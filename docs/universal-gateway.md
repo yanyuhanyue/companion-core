@@ -186,3 +186,50 @@ G0 不经过 API/config/worker 执行交接，不声称完成真实外部客户�
   沿用单一 Core 编排、原始准入、终态责任与提供者协议分离，未引入 DSH 到 Gateway 入口。
 - [主人授权](owner-authority.md)、[现有架构](architecture.md)、[来源授权](source-grants.md)：
   当前授权、来源处理、预算和遗忘保持各自原生归属；G1/G2 的接入缺口必须在相应切片闭合。
+
+## G1a 实现方案，待讨论
+
+G0 已合并为 `75a4cf0`。G1a 的目标是两个 OpenAI 兼容入口、独立客户端 Key、
+可配置别名，以及预算/回执约束下的非流式文本 Passthrough。
+以下是针对已核实接线缺口的建议范围，尚未实现运行时。
+
+### 已有机制与缺口
+
+- `budget.reserve()`、`budget.complete()`、`paid_budget.journal()` 和 ModelAdmission
+  已提供预留、结算、UNKNOWN、追加式费用责任和最终 HTTP 派发检查，继续作为唯一费用机制。
+- 原生准入中的 `_model_scope()` 和 `owner_authority.admit_model()` 目前要求原生任务及来源。
+  外部文本请求需要真实的客户端消费者身份，不能套用 `chat`、`evaluation` 或 QQ 来源证明。
+- Budget Journal 会检查数据库投影是否落后于账本。客户端与请求的关联也必须纳入这项核对，
+  否则旧备份可能丢失客户端用量和幂等归属，而费用记录仍然存在。
+- 执行器私有代理使用内存任务凭据和计数，无法提供持久的客户端配额、回执和恢复责任。
+- 参数适配仍须遵循已批准的上游。2026-10-31 核对的
+  [DeepSeek Chat Completions 文档](https://api-docs.deepseek.com/api/create-chat-completion/)
+  列出 system/user/assistant/tool 消息及 temperature；不能假设其支持 OpenAI 的所有角色或字段。
+  最终实际 payload 必须一致地进入计量、预算摘要和派发校验；未支持的参数在 I/O 前明确拒绝。
+
+### 建议范围
+
+1. 新增独立、默认关闭、限回环地址的 Gateway 入口和独立 worker，不修改 QQ HTTP/Bridge 链路。
+   API 认证及冻结请求，worker 负责受控生成；两者共享现有 Core 数据库。
+2. 第一版别名均映射到当前已获付费批准的同一上游路由。别名、客户端白名单和默认
+   Passthrough 授权分别配置；不增加多供应商路由编排。Companion、RP、工具和 stream=true 明确拒绝。
+3. 客户端凭据由本地主人管理入口维护，随机 Key 独立生成，只保存摘要；支持撤销、到期与轮换。
+   client_id 保持稳定，用量不随 Key/revision 重置。别名及客户端政策修订在最终派发前再次核对。
+4. 增加 Gateway 客户端和请求/回执的持久投影，不创建 QQ 事件或聊天任务。
+   客户端费用直接关联原 model_usage/model_admissions；不维护第二份余额，也不重复计费。
+   扩展原预算消费者检查及原 Journal 的不可变请求归属证据，核对 client、授权/别名版本、
+   请求摘要和预算引用；数据库或备份投影不一致时阻止派发。
+5. POST 等待原 worker 的有界结果；同 Idempotency-Key 复用同一请求，改变冻结内容则冲突。
+   增加仅本客户端可查询的回执入口，区分排队、执行、已结算、失败及 UNKNOWN。
+   HTTP 等待超时不会取消或重造付费尝试；崩溃和恢复不自动重试已开始或不确定的请求。
+6. 请求/结果正文只为执行和有界回执重交保留，使用现有加密设施并设置保留期；到期清除正文，
+   保留必要的摘要与费用责任。Passthrough 不进入长期记忆、日记、心情、认知或 Life。
+7. 验证包含真实 HTTP 入口及独立 worker、模拟供应商传输；覆盖权限越界、并发额度、
+   撤销/轮换、同键重放、已结算但响应丢失、未知费用、崩溃恢复与旧备份拒绝重放。
+
+### 取舍
+
+直接开放执行器代理代码改动较少，但会绕开原持久准入与回执责任，因此不采用。
+把所有内部任务一起改成通用调度器会扩大到 QQ 和 Life 的职责，不属于本切片。
+建议只补齐上述 Gateway 原生消费者，并保持现有预算和模型适配器职责。
+SSE、更多上游路由、Companion/RP 和客户端 UI 分别后续交付。
