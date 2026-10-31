@@ -286,7 +286,7 @@ async def run(config):
             from .owner_memes import MemePump
             from .pending_media import MediaPump
             from .profile_probe import ProfilePump
-            from .scheduled_import import schedule_import_job, run_scheduler_loop
+            from .scheduled_import import run_scheduler_loop, schedule_import_job
 
             media = MediaPump(runtime, core, protocol=onebot, metrics=metrics)
             profile = ProfilePump(runtime, core, protocol)

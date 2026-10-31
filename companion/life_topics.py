@@ -430,8 +430,20 @@ class LifeTopics:
             value = json.loads(result["proposal_json"])
             if not isinstance(value, dict):
                 raise ValueError("draft must be an object")
-            decision = LifeDecision.model_validate({k: v for k, v in value.items()
-                                                    if k != "qzone_draft"})
+            decision = LifeDecision.model_validate({
+                k: v for k, v in value.items() if k not in {"qzone_draft", "related_trait_ids"}
+            })
+            if "related_trait_ids" in value:
+                expected_traits = [
+                    interest["trait_id"]
+                    for interest in (material or {}).get("decision_context", {}).get(
+                        "self_interests", []
+                    )
+                    if set(interest["source_event_ids"]) & set(decision.source_event_ids)
+                ]
+                if (decision.destination != "PRIVATE_MESSAGE_DRAFT"
+                    or not expected_traits or value["related_trait_ids"] != expected_traits):
+                    raise ValueError("related interests must match the retained decision context")
             valid = (
                 approved["sha256"] == result["authority_sha256"]
                 and json.loads(result["source_fingerprints_json"])
@@ -1202,7 +1214,8 @@ class LifeTopics:
             from companion.life_autonomy import LifeAutonomy
             autonomy = LifeAutonomy(s, self.settings, self.clock)
             outcome = {
-                "status": "SUCCESS" if decision.action in ["EXPLORE", "CONTINUE", "SHARE"] else "DEFERRED",
+                "status": ("SUCCESS" if decision.action in ["EXPLORE", "CONTINUE", "SHARE"]
+                           else "DEFERRED"),
                 "goal_id": decision.goal_id,
                 "action": decision.action,
             }

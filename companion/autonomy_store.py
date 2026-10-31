@@ -2,14 +2,13 @@
 Autonomy store: database operations for tactical and strategic layers.
 """
 
-from datetime import datetime
 import json
-from typing import Any
+from datetime import datetime
 
 from companion.autonomy import (
     ExplorationStrategy,
-    InterestPriority,
     InterestPortfolio,
+    InterestPriority,
     PortfolioChange,
     ReflectionInsight,
 )
@@ -293,7 +292,7 @@ class AutonomyStore:
         )
 
         if os.path.exists(schema_path):
-            with open(schema_path, "r", encoding="utf-8") as f:
+            with open(schema_path, encoding="utf-8") as f:
                 schema_sql = f.read()
 
             # Execute each statement

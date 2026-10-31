@@ -8,7 +8,6 @@ These tasks should be run periodically to maintain long-term autonomy:
 - Monthly reflection: monthly
 """
 
-from datetime import datetime
 
 
 def run_portfolio_rebalancing(store, settings, clock):
