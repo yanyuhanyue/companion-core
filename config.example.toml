@@ -25,6 +25,10 @@ memory_daily_micro_usd = 50000
 # Owner bursts are answered once: a new message waits 2 s (5 s while the chat is active),
 # each further message 2 s more, at most 8 s per batch. Commands are never delayed.
 # To answer every message at once, add `[input_debounce]` with `enabled = false`.
+# A short closing message ("嗯", "好的") right after a reply may go unanswered, and when a
+# lively chat goes quiet for 15 min the bot may add one line (at most 3 checks a day).
+# To turn these off, add `[turn_taking]` with `silence_enabled = false` and/or
+# `follow_up_enabled = false`.
 # Long-term memory is on by default; run life-worker for background memory extraction.
 memory_enabled = true
 evaluation_enabled = false # Owner-consented, six-call no-delivery experiments on the same budget.

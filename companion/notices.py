@@ -96,6 +96,12 @@ def _material(store, settings, kind, ref, now):
                 "reading": {key: reading[key] for key in
                             ("level", "part", "subtitle_status", "truncated") if key in reading}}
         sources = [row["event_id"]]
+    elif kind == "followup":
+        from companion.turn_taking import follow_up_material
+
+        if not settings.turn_taking.follow_up_enabled:
+            raise CoreError("NOTICE_SOURCE_UNAVAILABLE", 409)
+        data, sources = follow_up_material(store, ref, now)
     elif kind == "commitment":
         row = store.one(
             "SELECT c.*,g.topic,g.redacted FROM commitments c JOIN goals g USING(goal_id) "
@@ -189,7 +195,7 @@ def validate(store, settings, job, now):
             executing=current["job_state"] == "RUNNING",
         )
     if (not isinstance(value, dict) or set(value) != {"kind", "ref", "material_sha256"}
-        or value["kind"] not in {"share", "commitment", "life"}
+        or value["kind"] not in {"share", "commitment", "life", "followup"}
         or not isinstance(value["ref"], str) or not 1 <= len(value["ref"]) <= 128
         or not isinstance(value["material_sha256"], str)
         or not re.fullmatch(r"[a-f0-9]{64}", value["material_sha256"])
@@ -245,6 +251,11 @@ def messages(store, settings, job, now, principles):
         from companion.life_topics import RULES as LIFE_RULES
 
         rules = LIFE_RULES
+    elif data["kind"] == "followup":
+        from companion.turn_taking import FOLLOW_UP_RULES, silent_minutes
+
+        rules = FOLLOW_UP_RULES
+        payload["silent_minutes"] = silent_minutes(data, now)
     result = [{"role": "system", "content": principles + "\n" + rules},
               {"role": "user", "content": encode(payload)}]
     while (payload["text"]
@@ -283,7 +294,7 @@ def record(store, settings, job, message_ids, now):
     value = reference(job)
     if not value:
         return
-    if value["kind"] == "life":
+    if value["kind"] in {"life", "followup"}:
         return
     if value["kind"] == "share":
         store.execute("UPDATE social_candidates SET message_id=?,updated_at=? "

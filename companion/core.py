@@ -25,6 +25,7 @@ from companion import (
     reply_quote,
     reply_revision,
     time_context,
+    turn_taking,
     watch_ledger,
 )
 from companion.affect import NEUTRAL, AffectEngine
@@ -779,6 +780,10 @@ class Core(Runtime):
         reference_sources = []
         reference_proofs = []
         bounded_text = private_life.strict(s, cfg)
+        if turn_taking.offered(s, cfg, job):
+            # Per-turn, so it stays after the static prefix.
+            dynamic_rules.append(turn_taking.SILENCE_RULES)
+            add_rules("")
         has_images = qq_images.enabled(cfg) and bool(qq_images.manifest(body))
         combined = (bounded_text and cfg.live_text_window.history_scope == "approved_window"
                     and cfg.live_text_window.memory_scope == "approved_facts")
@@ -1651,7 +1656,9 @@ class Core(Runtime):
                     self.life_topics.submit_goal(job, self.goals)
                 if notice_parts == []:
                     notices.record(self.store, self.settings, job, [], now)
-                if reply_is_current and (
+                silent = (reply_is_current and generated_reply and job["kind"] == "chat"
+                          and turn_taking.skipped(self.store, self.settings, job, reply))
+                if reply_is_current and not silent and (
                     job["kind"] != "activity" or should_send
                     or notices.required(self.store, job["job_id"])
                 ):
@@ -1723,7 +1730,8 @@ class Core(Runtime):
                     (now, job["job_id"]),
                 )
                 self.store.audit("job.succeeded", job["job_id"], job["trace_id"], now,
-                                 **({"reply_suppressed": True} if not reply_is_current else {}))
+                                 **({"reply_suppressed": True} if not reply_is_current else {}),
+                                 **({"reply_skipped": True} if silent else {}))
             emit(
                 "t_job_done",
                 job["trace_id"],
