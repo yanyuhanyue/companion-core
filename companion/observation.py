@@ -511,7 +511,7 @@ class ObservationService:
 
     def append(self, adapter_id, observation, *, reading=False):
         adapter = self.policy(adapter_id)
-        if adapter.source == "web" and not reading:
+        if adapter.source in {"web", "qzone"} and not reading:
             raise CoreError("READER_PROTOCOL_REQUIRED", 409)
         now, s = self.clock(), self.store
         receipt = observation.model_dump(

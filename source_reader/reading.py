@@ -26,7 +26,7 @@ class ReadingContext:
 
     def __post_init__(self):
         if (
-            self.source not in {"bilibili", "heybox", "web"}
+            self.source not in {"bilibili", "heybox", "web", "qzone"}
             or type(self.privacy_epoch) is not int or self.privacy_epoch < 0
             or not isinstance(self.source_event_ids, tuple) or len(self.source_event_ids) > 256
             or any(not isinstance(value, str) or not 1 <= len(value) <= 128
@@ -59,7 +59,7 @@ def observation(row, item, context, parser_version, clock):
     text = row["title"] if discovered else row["text"].strip()
     if not text or len(text) > 12000:
         raise ReadFailure("READ_BODY_UNAVAILABLE")
-    evidence = row.get("reading") or row.get("article") or row.get("web") or {}
+    evidence = row.get("reading") or row.get("article") or row.get("web") or row.get("qzone") or {}
     if discovered:
         coverage = {"level": "DISCOVERED", "scope": "link_and_title"}
         if item.get("discovery_mode") == "recommend":
@@ -80,6 +80,7 @@ def observation(row, item, context, parser_version, clock):
             raise ReadFailure("READER_EVIDENCE_REQUIRED")
         coverage = {
             "level": "TEXT", "scope": "article_text" if context.source == "heybox"
+            else "latest_post_text" if context.source == "qzone"
             else "extracted_page_text", "truncated": evidence["truncated"],
             "images_analyzed": False,
         }

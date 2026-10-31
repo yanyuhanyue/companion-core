@@ -6,7 +6,7 @@ Standard library only: no Core validation, storage, authentication or I/O import
 from dataclasses import dataclass
 from typing import Literal
 
-ContentSource = Literal["bilibili", "heybox", "web"]
+ContentSource = Literal["bilibili", "heybox", "web", "qzone"]
 ObservationSource = Literal[
     ContentSource, "voice", "camera", "android", "dsh", "windows", "simulation",
     "qq_image", "qq_file",
@@ -65,6 +65,13 @@ DEFINITIONS = (
         name="web", capabilities=frozenset({"get", "read"}),
         content_hosts=frozenset(), content_path="", identifier="", canonical_prefix="",
         image_hosts=frozenset(), reading_evidence_hosts=frozenset(), share_label="网页正文",
+    ),
+    SourceDefinition(
+        name="qzone", capabilities=frozenset({"get", "source_grant"}),
+        content_hosts=frozenset({"user.qzone.qq.com"}),
+        content_path=r"/([1-9][0-9]{4,19})/?", identifier=r"[1-9][0-9]{4,19}",
+        canonical_prefix="https://user.qzone.qq.com/", image_hosts=frozenset(),
+        reading_evidence_hosts=frozenset(), share_label="空间正文",
     ),
 )
 

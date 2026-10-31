@@ -282,6 +282,16 @@ def register_console_routes(app, settings):
 
     auth = [Depends(owner)]
 
+    from companion.qzone_publication_api import register_routes as register_publication_routes
+
+    def publication_check(request):
+        captured, clock = _request_fields(request), app.state.core.clock
+        return lambda store: _check_owner(SimpleNamespace(
+            store=store, settings=settings, clock=clock), captured)
+
+    register_publication_routes(app, settings, prefix + "/qzone/publications", auth,
+                                publication_check)
+
     async def write(request, key, body, apply, *, rejected_errors=frozenset()):
         clock, captured = app.state.core.clock, _request_fields(request)
 

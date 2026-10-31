@@ -213,6 +213,11 @@ def _source(store, settings, event_id, now):
         ):
             raise CoreError("LIFE_SOURCE_UNAVAILABLE", 409)
         kind, status = "owner_message", None
+    elif row["source"] == "observation.qzone":
+        from companion.qzone import review_source
+
+        preview = review_source(store, settings, event_id, now)
+        text, kind, status = preview["excerpt"], "social_content", preview["evidence_level"]
     else:
         preview = SocialPlanner(store, settings, lambda: now).preview(
             event_id, settings.owner_qq_id
@@ -230,7 +235,7 @@ def _source(store, settings, event_id, now):
         "text": text[:500],
         "occurred_at": row["occurred_at"],
         "source": row["source"],
-        **({"url": preview["url"]} if kind == "observed_content" else {}),
+        **({"url": preview["url"]} if kind in {"observed_content", "social_content"} else {}),
         "result_status": status,
         "expires_at": after(row["ingested_at"], retention * 86400),
         "source_sha256": sha(
@@ -284,6 +289,10 @@ def _completed_goal_source(store, settings, event_id, scope, now, authority_sha2
 
 def authority(store, settings, conversation_id, sources, now, *, topic_id=None, check_limit=True):
     """Current approval only. Model output and existing share consent cannot fill this in."""
+    social_sources = any(source["kind"] == "social_content" for source in sources)
+    if social_sources and (not all(source["kind"] == "social_content" for source in sources)
+                           or not owner_authority.required(store, settings)):
+        raise CoreError("LIFE_SOCIAL_DRAFT_SCOPE_REQUIRED", 403)
     if not owner_authority.required(store, settings):
         return {
             "sha256": sha({"synthetic": True, "mode": settings.life_loop.mode}),
@@ -326,7 +335,11 @@ def authority(store, settings, conversation_id, sources, now, *, topic_id=None, 
             qzone = []
             break
         qzone.append(grant.model_dump(mode="json"))
-    destinations = list(scope.purposes)
+    if social_sources:
+        owner_authority.current(store, settings, lambda: now, purpose="social")
+        if not qzone:
+            raise CoreError("LIFE_SOCIAL_DRAFT_SCOPE_REQUIRED", 403)
+    destinations = [] if social_sources else list(scope.purposes)
     if "PRIVATE_CREATION" in destinations:
         from companion.rem import _authority
 
@@ -816,7 +829,8 @@ class LifeTopics:
             rows = s.rows(
                 "SELECT e.event_id FROM events e WHERE e.redacted=0 "
                 "AND e.ingested_at>=? AND (e.source='qq.onebot' OR "
-                "e.source IN ('observation.bilibili','observation.heybox','observation.web')) "
+                "e.source IN ('observation.bilibili','observation.heybox','observation.web',"
+                "'observation.qzone')) "
                 "AND NOT EXISTS (SELECT 1 FROM life_topic_sources t WHERE t.event_id=e.event_id) "
                 "ORDER BY e.rowid DESC LIMIT 32",
                 (after(now, -cfg.topic_ttl_seconds),),
@@ -1065,6 +1079,7 @@ class LifeTopics:
         if any(item["requires_reconciliation"] for item in context["execution_outcomes"]):
             raise CoreError("LIFE_RECONCILIATION_REQUIRED", 503)
 
+        social_only = any(source["kind"] == "social_content" for source in sources)
         return {
             "kind": "life",
             "topic_id": topic_id,
@@ -1076,9 +1091,9 @@ class LifeTopics:
             "source_events": {x["event_id"]: x["source_sha256"] for x in sources},
             "sources": sources,
             "text": "",
-            "goals": goals,
-            "read_goals_enabled": self.settings.life_loop.read_goals_enabled,
-            "read_targets": read_targets(self.settings, sources),
+            "goals": [] if social_only else goals,
+            "read_goals_enabled": self.settings.life_loop.read_goals_enabled and not social_only,
+            "read_targets": [] if social_only else read_targets(self.settings, sources),
             "allowed_destinations": approved["destinations"],
             "authority_sha256": approved["sha256"],
             "qzone_grants": approved["qzone"],
@@ -1118,6 +1133,11 @@ class LifeTopics:
             raise CoreError("LIFE_PROPOSAL_SCOPE_REQUIRED", 403)
         if not interest_shift_supported(decision, data["decision_context"]):
             raise CoreError("LIFE_INTEREST_SHIFT_UNSUPPORTED", 403)
+        if any(source["kind"] == "social_content" for source in data["sources"]) and (
+            decision.action not in {"SHARE", "SKIP"} or decision.goal is not None
+            or decision.goal_id is not None or decision.interest_shift is not None
+        ):
+            raise CoreError("LIFE_SOCIAL_DRAFT_SCOPE_REQUIRED", 403)
         if decision.action == "FOLLOW_UP" and data["topic_kind"] != "conversation":
             raise CoreError("LIFE_FOLLOW_UP_SOURCE_REQUIRED", 403)
         if (decision.goal is not None and decision.goal.scope.operation == "read_plan"

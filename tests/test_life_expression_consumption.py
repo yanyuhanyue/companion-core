@@ -35,7 +35,7 @@ def close_provider_clients(core):
 
 
 def prepared(core, tmp_path, *, destination="QZONE_DRAFT", private=False, purposes=None,
-             execute=True, automatic_actions=()):
+             execute=True, automatic_actions=(), social_options=None):
     configure(core)
     payload = envelope("bilibili")
     url = payload["observations"][0]["url"]
@@ -64,7 +64,7 @@ def prepared(core, tmp_path, *, destination="QZONE_DRAFT", private=False, purpos
     core.settings.life_loop = LifeLoopConfig(mode="SHADOW")
     core.settings.wake_enabled = core.settings.proactive_enabled = True
     core.settings.quiet_start = core.settings.quiet_end = 0
-    service(core, max_output_tokens=512)
+    service(core, max_output_tokens=512, **(social_options or {}))
     source = _source(core.store, core.settings, source_id, core.clock())
     grant = LifeQZoneSourceGrant(
         grant_id="draft-source-one", revision=1, purpose="qzone_draft", event_id=source_id,

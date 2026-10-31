@@ -378,6 +378,9 @@ def capability_hashes(settings):
         "voice": settings.voice.authority_sha256() if settings.voice.enabled else None,
         "account_actions": settings.social_autonomy.authorization_sha256
         if settings.social_autonomy.enabled else None,
+        "qzone_publication": _sha(settings.social_autonomy.model_dump(mode="json"))
+        if settings.social_autonomy.enabled and settings.social_autonomy.qzone_enabled
+        and settings.social_autonomy.qzone_public_enabled else None,
         "bili_video": _sha(settings.bili_video.model_dump(mode="json"))
         if settings.bili_video.enabled else None,
         "rem": _sha(settings.rem.model_dump(mode="json")) if settings.rem.enabled else None,

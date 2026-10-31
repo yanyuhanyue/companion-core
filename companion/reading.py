@@ -150,6 +150,17 @@ class ReadingService:
             policy = self.exploration.adapter(adapter_id)
 
             def request_limits(row):
+                if policy.source == "qzone":
+                    from companion.qzone import TARGET_TTL_SECONDS, validate_target
+
+                    captured = self.exploration.observations.grants.captured(row)
+                    if captured is None or captured != source_grant:
+                        return False
+                    validate_target(s, self.settings, self.clock, row)
+                    return {"max_items": 1, "max_requests": 1,
+                            "deadline": min(after(self.clock(), 30),
+                                after(row["created_at"], TARGET_TTL_SECONDS),
+                                captured.snapshot()["expires_at"])}
                 video = getattr(self, "video", None)
                 exists = s.one("SELECT 1 FROM sqlite_master WHERE name='bili_video_items'")
                 if not exists or not s.one("SELECT 1 FROM bili_video_items WHERE request_id=?",

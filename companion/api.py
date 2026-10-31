@@ -331,6 +331,9 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
     register_owner_authority_routes(app, control_auth)
     register_memory_projection_routes(app, control_auth)
     register_cognition_routes(app, control_auth)
+    from companion.qzone import register_routes as register_qzone_routes
+
+    register_qzone_routes(app, control_auth, reading_service, settings)
     adapter_auth = [Depends(observation_adapter)]
     register_media_routes(app, control_auth)
 

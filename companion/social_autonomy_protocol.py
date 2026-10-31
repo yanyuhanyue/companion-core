@@ -55,6 +55,7 @@ class SocialAutonomyConfig(Strict):
     authorization_sha256: Sha | None = None
     policy_version: int = Field(default=1, ge=1)
     qzone_enabled: bool = False
+    qzone_public_enabled: bool = Field(default=False, exclude_if=lambda value: not value)
     nickname_enabled: bool = False
     signature_enabled: bool = False
     avatar_enabled: bool = False
@@ -159,9 +160,22 @@ class OwnerAudience(Strict):
         return value
 
 
+class PublicAudience(Strict):
+    ugc_right: Literal[1] = 1
+    target_uins: list[str] = Field(default_factory=list, max_length=0)
+
+    @field_validator("ugc_right", mode="before")
+    @classmethod
+    def exact_right(cls, value):
+        if type(value) is not int:
+            raise ValueError("visibility must be an integer")
+        return value
+
+
 class FrozenPlan(Versioned):
     """Output only: the module creates this from native evidence, never accepts it as a proposal."""
 
+    schema_version: Literal[1, 2] = 1
     plan_id: Ref
     message_id: Ref
     delivery_key: Ref
@@ -176,8 +190,15 @@ class FrozenPlan(Versioned):
     payload_sha256: Sha
     profile_baseline_sha256: Sha | None = None
     asset_sha256: Sha | None = None
-    audience: OwnerAudience | None = None
+    audience: OwnerAudience | PublicAudience | None = None
     expires_at: Timestamp
+
+    @model_validator(mode="after")
+    def public_review_version(self):
+        public = isinstance(self.audience, PublicAudience)
+        if (self.schema_version == 2) != public or public and self.action_type != "qzone.publish":
+            raise ValueError("Public QZone plans require the reviewed v2 contract")
+        return self
 
 
 class ReviewedAvatar(Strict):
