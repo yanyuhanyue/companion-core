@@ -8,7 +8,7 @@ from companion import affect, reply_revision
 from companion.affect import NEUTRAL
 from companion.backup import backup, restore
 from companion.contracts import CoreError
-from companion.conversation_policy import ConversationPolicyConfig
+from companion.conversation_policy import PARTICIPATION_V1, ConversationPolicyConfig
 from companion.core import Core
 from tests.conftest import ingest, run
 
@@ -75,6 +75,9 @@ def test_native_owner_reset_command_needs_no_generation(core):
 
 @pytest.mark.parametrize("mode", ["OFF", "ENABLED"])
 def test_core_shadow_preserves_payload_and_reset_fences_source(core, mode):
+    # Compare policy payloads with room for the added guidance; budget pruning has
+    # its own dialogue-context tests and may legitimately drop optional references.
+    core.settings.context_soft_tokens += len(PARTICIPATION_V1.encode("utf-8"))
     core.settings.affect_enabled = True
     accepted = ingest(core, 1, "简短一点")
     core.store.execute("UPDATE jobs SET state='SUCCEEDED' WHERE job_id=?", (accepted["job_id"],))

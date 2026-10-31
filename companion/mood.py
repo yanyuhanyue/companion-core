@@ -9,7 +9,7 @@ import re
 from contextlib import nullcontext
 from datetime import UTC, datetime
 
-from companion import goal_plan, owner_authority
+from companion import goal_plan, mood_appraisals, owner_authority
 from companion.contracts import CoreError
 from companion.memory_authority import source_allowed
 from companion.memory_context import MemorySources, check_version, read_version
@@ -48,28 +48,56 @@ FEEDBACK = {
 INTERACTIONS = {
     text + ending: (reason, delta)
     for reason, delta, texts in (
-        ("SHARED_IDEA_INTEREST", (0.025, 0.02, 0.0), (
-            "这个想法很有意思", "这个想法挺有意思", "这个想法挺有趣的",
-            "这个思路很有意思",
-        )),
-        ("DISCUSSION_CURIOSITY", (0.01, 0.025, 0.0), (
-            "这个问题让我很好奇", "我对这个问题很好奇", "这个问题值得继续探讨",
-            "我想继续探讨这个问题",
-        )),
-        ("PERSPECTIVE_SURPRISE", (0.0, 0.03, 0.0), (
-            "这个角度我没想到", "这个角度我真没想到", "这个角度真没想到",
-        )),
-        ("PERSPECTIVE_SURPRISE", (0.02, 0.03, 0.0), (
-            "这个思路让我眼前一亮",
-        )),
-        ("VIEW_DISAGREEMENT", (0.0, 0.01, 0.0), (
-            "这个观点我不认同", "我对这个观点有不同看法", "这个观点我有不同看法",
-            "我不太同意这个看法",
-        )),
-        ("DISCUSSION_PROGRESS", (0.025, 0.0, 0.025), (
-            "这个问题终于理清了", "这样就说得通了", "这次讨论有进展了",
-            "我们把这个问题说清楚了",
-        )),
+        (
+            "SHARED_IDEA_INTEREST",
+            (0.025, 0.02, 0.0),
+            (
+                "这个想法很有意思",
+                "这个想法挺有意思",
+                "这个想法挺有趣的",
+                "这个思路很有意思",
+            ),
+        ),
+        (
+            "DISCUSSION_CURIOSITY",
+            (0.01, 0.025, 0.0),
+            (
+                "这个问题让我很好奇",
+                "我对这个问题很好奇",
+                "这个问题值得继续探讨",
+                "我想继续探讨这个问题",
+            ),
+        ),
+        (
+            "PERSPECTIVE_SURPRISE",
+            (0.0, 0.03, 0.0),
+            (
+                "这个角度我没想到",
+                "这个角度我真没想到",
+                "这个角度真没想到",
+            ),
+        ),
+        ("PERSPECTIVE_SURPRISE", (0.02, 0.03, 0.0), ("这个思路让我眼前一亮",)),
+        (
+            "VIEW_DISAGREEMENT",
+            (0.0, 0.01, 0.0),
+            (
+                "这个观点我不认同",
+                "我对这个观点有不同看法",
+                "这个观点我有不同看法",
+                "我不太同意这个看法",
+            ),
+        ),
+        (
+            "DISCUSSION_PROGRESS",
+            (0.025, 0.0, 0.025),
+            (
+                "这个问题终于理清了",
+                "这样就说得通了",
+                "这次讨论有进展了",
+                "我们把这个问题说清楚了",
+            ),
+        ),
     )
     for text in texts
     for ending in ("", "，我们继续聊聊", "，想再听听你的看法")
@@ -216,8 +244,12 @@ class MoodService:
         sources = MemorySources(self.memory, self.clock())
         if owner_authority.required(s, cfg):
             view = owner_authority.current(s, cfg, self.clock, purpose="expression")
-            sources.cutoff = max(sources.cutoff, datetime.fromisoformat(after(
-                self.clock(), -view.policy.source_retention_days * 86400)))
+            sources.cutoff = max(
+                sources.cutoff,
+                datetime.fromisoformat(
+                    after(self.clock(), -view.policy.source_retention_days * 86400)
+                ),
+            )
         cutoff = max(after(at, -WINDOW), reset_at(s) or after(at, -WINDOW))
         candidates = s.rows(
             "SELECT e.event_id,e.occurred_at AS at,'feedback' AS kind FROM events e "
@@ -242,8 +274,10 @@ class MoodService:
                 continue
             event = next(row for row in lineage if row["event_id"] == key)
             # Reset and lookback follow the original event too: a delayed review cannot revive it.
-            if (not cutoff < stamp(event["ingested_at"]) <= at
-                or not cutoff < stamp(event["occurred_at"]) <= at):
+            if (
+                not cutoff < stamp(event["ingested_at"]) <= at
+                or not cutoff < stamp(event["occurred_at"]) <= at
+            ):
                 continue
             body = json.loads(event["body_json"])
             identity, detail, reason, delta = key, None, None, None
@@ -298,12 +332,18 @@ class MoodService:
                         "AND source='qq.onebot' AND actor_id='owner' "
                         "AND event_type IN ('message.received','message.media_received') "
                         "AND rowid<(SELECT rowid FROM events WHERE event_id=?) "
-                        "ORDER BY rowid DESC LIMIT 1", (event["conversation_id"], key),
+                        "ORDER BY rowid DESC LIMIT 1",
+                        (event["conversation_id"], key),
                     )
-                    elapsed = (datetime.fromisoformat(candidate["at"])
-                               - datetime.fromisoformat(reply["sent_at"])).total_seconds()
-                    if (not preceding or preceding["event_id"] != reply["origin_event_id"]
-                        or not 0 <= elapsed <= INTERACTION_REPLY_WINDOW):
+                    elapsed = (
+                        datetime.fromisoformat(candidate["at"])
+                        - datetime.fromisoformat(reply["sent_at"])
+                    ).total_seconds()
+                    if (
+                        not preceding
+                        or preceding["event_id"] != reply["origin_event_id"]
+                        or not 0 <= elapsed <= INTERACTION_REPLY_WINDOW
+                    ):
                         continue
                     kind = "interaction"
                 lineage += prior
@@ -397,6 +437,7 @@ class MoodService:
             if (category, identity) not in used:
                 signals.append(signal)
                 used.add((category, identity))
+        signals += self._appraisals(at, allowed, cutoff, sources, {x["event_id"] for x in signals})
         # The same observation's review and verified goal result form one bounded impulse.
         merged = {}
         for item in signals:
@@ -415,9 +456,51 @@ class MoodService:
                 prior["reason"], prior["kind"] = "REVIEWED_GOAL_COMPLETION", "experience"
             else:
                 merged[key] = item
-        return sorted(
+        ordered = sorted(
             merged.values(), key=lambda item: (item["at"], item["event_id"], item["kind"])
-        ), len(candidates) > LIMIT
+        )
+        return ordered[-LIMIT:], len(candidates) > LIMIT or len(ordered) > LIMIT
+
+    def _appraisals(self, at, allowed, cutoff, sources, taken):
+        """Model-judged owner wording; an exact-phrase signal on the same message wins."""
+        s = self.store
+        rows = [
+            row
+            for row in s.rows(
+                "SELECT * FROM mood_appraisals WHERE created_at>? AND created_at<=? "
+                "ORDER BY created_at,event_id",
+                (cutoff, at),
+            )
+            if row["event_id"] not in taken and mood_appraisals.still_valid(s, row)
+        ]
+        signals = []
+        for row in mood_appraisals.capped(rows, self.settings.timezone):
+            key = row["event_id"]
+            lineage = self._lineage(key, sources)
+            if not lineage:
+                continue
+            event = next(item for item in lineage if item["event_id"] == key)
+            if (
+                not cutoff < stamp(event["ingested_at"]) <= at
+                or not cutoff < stamp(event["occurred_at"]) <= at
+            ):
+                continue
+            ids = sorted({item["event_id"] for item in lineage})
+            if allowed is not None and not set(ids) <= set(allowed):
+                continue
+            signals.append(
+                {
+                    "event_id": key,
+                    "source_event_ids": ids,
+                    "kind": "appraisal",
+                    "at": stamp(row["created_at"]),
+                    "reason": row["reason"],
+                    "delta": list(mood_appraisals.REASONS[row["reason"]]),
+                    "independent_id": "appraisal:" + key,
+                    "fingerprint": sha([lineage, dict(row)]),
+                }
+            )
+        return signals
 
     def snapshot(self, *, at=None, allowed=None):
         at = stamp(at or self.clock())
@@ -458,7 +541,7 @@ class MoodService:
         ]
         if truncated:
             for point in result["trend"]:
-                point["undertone"] = vector([0., 0., 0.])
+                point["undertone"] = vector([0.0, 0.0, 0.0])
                 point["expression"] = point["immediate"].copy()
         check_version(self.memory, captured)
         return result

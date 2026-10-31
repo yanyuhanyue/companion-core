@@ -102,7 +102,7 @@ def test_native_context_selection_keeps_evidence_origin_and_recent_dialogue(core
             # Exclude the raw original owner utterance: reference copies occur once.
             refs = [m for m in messages if m["role"] == "user" and any(
                 heading in m.get("content", "") for heading in (
-                    "目标与结果参考", "你最近看过的内容", "参考资料（", "自身兴趣与过往判断"))]
+                    "目标与结果参考", "你最近看过的内容", "你记得的事（", "自身兴趣与过往判断"))]
             assert encode(refs).count(fact) == 1
             assert "主人发给你后你决定去看的" in prompt
             assert "光谱标注那个疑问还没解释清楚" in prompt

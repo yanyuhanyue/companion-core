@@ -50,8 +50,12 @@ def _lock_report(site, started, locked, finished, outcome):
         return
     code, line = site
     try:
-        emit_lock(f"{Path(code.co_filename).stem}:{code.co_name}:{line}", wait_ms=wait_ms,
-                  held_ms=held_ms, outcome=outcome)
+        emit_lock(
+            f"{Path(code.co_filename).stem}:{code.co_name}:{line}",
+            wait_ms=wait_ms,
+            held_ms=held_ms,
+            outcome=outcome,
+        )
     except Exception:
         pass  # Instrumentation must not replace the transaction's result or exception.
 
@@ -109,8 +113,9 @@ class Store:
                 # rollback. Only append-only stop witnesses are replayed here.
                 self.db.execute("BEGIN IMMEDIATE")
                 try:
-                    self.db.executemany("INSERT OR IGNORE INTO runtime_meta VALUES (?,?)",
-                                        self._budget_stops)
+                    self.db.executemany(
+                        "INSERT OR IGNORE INTO runtime_meta VALUES (?,?)", self._budget_stops
+                    )
                     self.db.commit()
                 except BaseException:
                     self.db.rollback()
@@ -142,27 +147,72 @@ class Store:
             "events": {"event_id", "redacted", "memory_processed", "fingerprint", "reply_revision"},
             "jobs": {"lease_token", "state", "context_tracked", "authority_json"},
             "job_sources": {"job_id", "event_id"},
-            "rem_records": {"rem_id", "job_id", "source_snapshot_json", "output_json",
-                            "source_event_ids_json", "redacted", "expires_at"},
-            "agent_conversations": {"job_id", "phase", "conversation_json", "snapshots_json",
-                                    "request_id", "output_text"},
+            "rem_records": {
+                "rem_id",
+                "job_id",
+                "source_snapshot_json",
+                "output_json",
+                "source_event_ids_json",
+                "redacted",
+                "expires_at",
+            },
+            "agent_conversations": {
+                "job_id",
+                "phase",
+                "conversation_json",
+                "snapshots_json",
+                "request_id",
+                "output_text",
+            },
             "agent_tool_calls": {"job_id", "tool_call_id", "state", "request_id"},
             "captured_images": {"item_id", "proof_json", "mime", "expires_at"},
             "agent_image_inputs": {"job_id", "item_id", "position"},
             "voice_jobs": {"job_id", "state", "generation", "authority_json"},
-            "meme_discovery_reservations": {"job_id", "attempt_key", "state", "reserved_queries",
-                                             "reserved_download_bytes", "reserved_storage_bytes"},
-            "meme_captions": {"job_id", "request_sha256", "asset_data", "source_json",
-                              "usage_request_id", "result_json", "reuse_job_id"},
-            "outbox": {"lease_token", "state", "content_json", "reply_group_id", "segment_index",
-                       "segment_count", "reply_group_sha256", "segment_interval_ms"},
+            "meme_discovery_reservations": {
+                "job_id",
+                "attempt_key",
+                "state",
+                "reserved_queries",
+                "reserved_download_bytes",
+                "reserved_storage_bytes",
+            },
+            "meme_captions": {
+                "job_id",
+                "request_sha256",
+                "asset_data",
+                "source_json",
+                "usage_request_id",
+                "result_json",
+                "reuse_job_id",
+            },
+            "outbox": {
+                "lease_token",
+                "state",
+                "content_json",
+                "reply_group_id",
+                "segment_index",
+                "segment_count",
+                "reply_group_sha256",
+                "segment_interval_ms",
+            },
             "memories": {"needs_review", "fact_key"},
             "memory_vectors": {"model_version", "content_hash", "vector"},
             "runtime_meta": {"key", "value"},
-            "model_admissions": {"payload_sha256", "snapshot_json", "measurement_json",
-                                 "authority_json"},
-            "owner_authority_revisions": {"grant_id", "revision", "policy_json", "policy_sha256",
-                                          "record_sha256", "operation_id", "request_sha256"},
+            "model_admissions": {
+                "payload_sha256",
+                "snapshot_json",
+                "measurement_json",
+                "authority_json",
+            },
+            "owner_authority_revisions": {
+                "grant_id",
+                "revision",
+                "policy_json",
+                "policy_sha256",
+                "record_sha256",
+                "operation_id",
+                "request_sha256",
+            },
             "diary_runs": {"captured_privacy_epoch", "lease_token", "source_set_sha256"},
             "diary_entries": {"body_md", "status", "version"},
             "diary_evidence": {"event_id", "outbox_message_id"},
@@ -175,16 +225,26 @@ class Store:
             "consents": {"capabilities_json", "expires_at", "revoked_at"},
             "affect_states": {"state_json", "expires_at", "version"},
             "affect_evidence": {"event_id", "reason_code", "expires_at"},
-            "reflection_runs": {"captured_privacy_epoch", "lease_token", "model_request_id",
-                                "next_attempt_at"},
+            "reflection_runs": {
+                "captured_privacy_epoch",
+                "lease_token",
+                "model_request_id",
+                "next_attempt_at",
+            },
             "reflection_evidence": {"event_id", "outbox_message_id"},
             "reflection_suggestions": {"kind", "content", "state"},
             "consolidation_runs": {"steps_json", "lease_token", "captured_privacy_epoch"},
             "consolidation_evidence": {"event_id", "run_id"},
             "goals": {"scope_json", "state", "redacted", "reflection_suggestion_id"},
+            "mood_appraisals": {"event_id", "reason", "quote_sha256", "request_id"},
             "goal_evidence": {"event_id", "goal_id"},
-            "goal_steps": {"lease_token", "captured_privacy_epoch", "attempts", "position",
-                           "scope_json"},
+            "goal_steps": {
+                "lease_token",
+                "captured_privacy_epoch",
+                "attempts",
+                "position",
+                "scope_json",
+            },
             "goal_step_evidence": {"step_id", "event_id"},
             "commitments": {"deadline", "feedback_message_id", "feedback_outcome"},
             "wake_decisions": {"idempotency_key", "decision", "budget_snapshot"},
@@ -197,8 +257,14 @@ class Store:
                 "source_grant_id",
                 "source_grant_epoch",
             },
-            "reading_attempts": {"request_id", "lease_token", "context_json", "state",
-                                 "observed_requests", "observed_bytes"},
+            "reading_attempts": {
+                "request_id",
+                "lease_token",
+                "context_json",
+                "state",
+                "observed_requests",
+                "observed_bytes",
+            },
             "social_candidates": {"event_id", "message_id", "comparison_text"},
             "tool_tasks": {"scope_sha256", "captured_privacy_epoch", "billed_micro_usd"},
             "tool_approvals": {"scope_sha256", "expires_at", "revoked_at"},

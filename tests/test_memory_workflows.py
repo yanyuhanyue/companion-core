@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from companion.backup import backup, restore
 from companion.contracts import CoreError
 from companion.core import Core
+from companion.model import MEMORY_HEADING
 from tests.conftest import ingest, run
 
 
@@ -69,7 +70,7 @@ def test_paraphrased_question_in_new_session_with_old_fact_and_distractors(core,
     context = next(
         messages for messages, scenario in reversed(core.model.calls) if scenario == "chat"
     )
-    references = [m for m in context if m["content"].startswith("参考资料（")]
+    references = [m for m in context if m["content"].startswith(MEMORY_HEADING + "\n")]
     assert len(references) == 1 and answer in references[0]["content"]
     assert len(core.memory.search(question)) <= 6
     assert core.memory.search("今天下午下雨了吗？") == []

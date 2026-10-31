@@ -301,6 +301,44 @@ def recent(store, limit=CONTEXT_ITEMS):
     return items
 
 
+MENTION_WINDOW = 86400
+MENTION_OVERLAP = 0.4
+
+
+def mentioned(store, conversation_id, item, at):
+    """Whether her own sent replies in the last day already talked about this item.
+
+    Bounded by the job time, not the wall clock, so a rebuilt context selects the same items.
+    """
+    from companion.context_selection import terms
+
+    wanted = terms(item["title"]) | terms(item["take"] or "")
+    if not wanted:
+        return False
+    said = set()
+    for row in store.rows(
+        "SELECT content_json FROM outbox WHERE conversation_id=? AND state='SENT' "
+        "AND action_type IN ('qq.private.reply','qq.private.proactive') "
+        "AND sent_at>? AND sent_at<=?", (conversation_id, after(at, -MENTION_WINDOW), at)):
+        said |= terms(json.loads(row["content_json"]).get("text", ""))
+    return len(wanted & said) >= MENTION_OVERLAP * len(wanted)
+
+
+def context_items(store, items, conversation_id, at, related):
+    """Related items first; otherwise at most one she has not already brought up today."""
+    def score(item):
+        return related(" ".join([item["title"], item["take"] or "", *item["topic_tags"]]))
+
+    from companion.context_selection import RELATED
+
+    chosen = [item for item in items if score(item) >= RELATED][:CONTEXT_ITEMS]
+    if chosen:
+        return chosen
+    fresh = next((item for item in items
+                  if not mentioned(store, conversation_id, item, at)), None)
+    return [fresh] if fresh else []
+
+
 def context_proof(store, entry_id):
     """Bind quoted judgement to its live row, including withdrawal and deeper rereads."""
     row = store.one("SELECT w.entry_id,w.source_event_id,w.item_ref,w.depth,w.state,"

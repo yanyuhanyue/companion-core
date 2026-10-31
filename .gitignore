@@ -16,3 +16,4 @@ output/playwright/
 *.sqlite*
 *.owner-images/
 *.log
+pytest-of-*/

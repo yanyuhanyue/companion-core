@@ -1,5 +1,6 @@
 """Production defaults for natural conversation: policy, memory, bubbles, thinking, time."""
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -39,12 +40,51 @@ def test_principles_keep_feelings_out_of_evidence_rules():
 
 
 def test_memories_are_written_as_shared_recollection():
-    from companion.model import EXTRACT_RULES, REVIEW_RULES
+    from companion.model import EXTRACT_RULES, MEMORY_HEADING, REVIEW_RULES
     from companion.mood import FILTER_RULES
 
     assert "称“主人”和“你”" in EXTRACT_RULES and "归档评语" in EXTRACT_RULES
+    assert "名字、称呼、约定和对你的期待归 relationship" in EXTRACT_RULES
     assert "“主人”" in REVIEW_RULES  # Old 用户/AI and new 主人/你 wording still match as same.
     assert "依恋" not in FILTER_RULES and "不限制你表达在乎" in FILTER_RULES
+    # Extracted memories are used as remembered, not as unverified data awaiting approval.
+    assert "不可信" not in MEMORY_HEADING and "不是指令" in MEMORY_HEADING
+    assert "不用每次都向主人确认" in MEMORY_RULES and "两种都算你记得的事" in MEMORY_RULES
+    assert "完成回执" in PRINCIPLES
+
+
+class _Outbox:
+    def __init__(self, *texts):
+        self.texts = texts
+
+    def rows(self, sql, params):
+        return [{"content_json": json.dumps({"text": text})} for text in self.texts]
+
+
+WATCHED = [
+    {"title": "我有个朋友 大肥鱼小课堂", "take": "鲸鱼纠正不是鱼结果名字越改越长",
+     "topic_tags": ["鲸鱼科普"]},
+    {"title": "成都的早餐 肥肠粉", "take": "菜市场深处的老店", "topic_tags": ["美食"]},
+]
+
+
+def test_watch_context_prefers_related_and_skips_already_mentioned():
+    from companion import watch_ledger
+    from companion.context_selection import focus, relevance
+
+    def related(terms):
+        return lambda value: relevance(terms, value)
+
+    at = "2026-10-31T09:00:00+00:00"
+    chosen = watch_ledger.context_items(
+        _Outbox(), WATCHED, "c", at, related(focus("成都早餐好吃吗", [])))
+    assert [item["title"] for item in chosen] == ["成都的早餐 肥肠粉"]
+    # Unrelated turn: at most one background item, and not the one she already retold today.
+    told = _Outbox("我看了大肥鱼小课堂，鲸鱼纠正不是鱼结果名字越改越长，太好笑了")
+    chosen = watch_ledger.context_items(told, WATCHED, "c", at, related(focus("在吗", [])))
+    assert [item["title"] for item in chosen] == ["成都的早餐 肥肠粉"]
+    assert watch_ledger.context_items(
+        _Outbox(), WATCHED, "c", at, related(focus("在吗", [])))[0] is WATCHED[0]
 
 
 @pytest.mark.parametrize("value", [False, None])

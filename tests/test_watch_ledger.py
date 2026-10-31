@@ -202,8 +202,8 @@ def test_chat_cites_recent_judgements_only_when_enabled(core, enabled, text):
     if enabled:
         reference = next(item["content"] for item in messages
                          if JUDGEMENT["take"] in item["content"])
-        assert "主人邀请你起个话题时可以选用" in reference
-        assert "来源未记录，不要说是你自己挑的" in reference
+        assert json.loads(reference.split("\n", 1)[1])[0]["origin"] == (
+            "来源未记录，不要说是你自己挑的")
         assert core.store.one("SELECT 1 FROM job_sources WHERE job_id=? AND event_id=?",
                               (job["job_id"], event_id))
     assert core.model.calls == []
