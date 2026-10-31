@@ -70,27 +70,25 @@ def test_validate_filters_short_quotes(core):
 
 def test_validate_requires_hurt_reply_within_one_hour_window(core):
     """OWNER_HURT_BY_REPLY needs recent delivered reply."""
-    feedback(core, 100, text="base")
+    feedback(core, 50, text="base")
     core.clock.advance(3601)
-    ingest(core, 300, "you hurt me")
+    ingest(core, 150, "you hurt me")
     signals = [
         InteractionSignal(
-            event_id="evt_test_300", reason="OWNER_HURT_BY_REPLY", quote="you hurt me"
+            event_id="evt_test_150", reason="OWNER_HURT_BY_REPLY", quote="you hurt me"
         ),
     ]
-    kept = mood_appraisals.validate(core.store, signals, ["evt_test_300"])
+    kept = mood_appraisals.validate(core.store, signals, ["evt_test_150"])
     assert kept == []
 
     # Within window works
-    feedback(core, 200, text="new")
-    core.clock.advance(3599)
-    ingest(core, 400, "your reply hurt")
+    event_id = feedback(core, 200, text="your reply hurt")
     signals2 = [
         InteractionSignal(
-            event_id="evt_test_400", reason="OWNER_HURT_BY_REPLY", quote="your reply hurt"
+            event_id=event_id, reason="OWNER_HURT_BY_REPLY", quote="your reply hurt"
         ),
     ]
-    kept2 = mood_appraisals.validate(core.store, signals2, ["evt_test_400"])
+    kept2 = mood_appraisals.validate(core.store, signals2, [event_id])
     assert len(kept2) == 1
 
 
