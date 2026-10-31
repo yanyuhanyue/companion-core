@@ -17,13 +17,14 @@ from companion.memory_projections import MemoryProjections
 from companion.paid_budget import sha
 from companion.store import after, encode, uid
 
-VERSION = "mood-1"
+VERSION = "mood-2"
 RESET_KEY = "mood_reset_at"
 PAUSE_KEY = "mood_paused"
 DIMENSIONS = ("pleasure", "arousal", "dominance")
 HALF_LIVES = {"immediate": 3 * 3600, "undertone": 3 * 86400}
 WINDOW = 14 * 86400
 LIMIT = 256
+INTERACTION_REPLY_WINDOW = 3600
 # Whole original messages only. Quotations, commands and generated replies are excluded.
 FEEDBACK = {
     **{
@@ -42,6 +43,38 @@ FEEDBACK = {
         for ending in ("没帮上忙", "让我有点失望", "让我不舒服")
     },
 }
+# These are explicit owner appraisals of the shared discussion, not emotion
+# labels extracted from her reply. Match the entire original utterance only.
+INTERACTIONS = {
+    text + ending: (reason, delta)
+    for reason, delta, texts in (
+        ("SHARED_IDEA_INTEREST", (0.025, 0.02, 0.0), (
+            "这个想法很有意思", "这个想法挺有意思", "这个想法挺有趣的",
+            "这个思路很有意思",
+        )),
+        ("DISCUSSION_CURIOSITY", (0.01, 0.025, 0.0), (
+            "这个问题让我很好奇", "我对这个问题很好奇", "这个问题值得继续探讨",
+            "我想继续探讨这个问题",
+        )),
+        ("PERSPECTIVE_SURPRISE", (0.0, 0.03, 0.0), (
+            "这个角度我没想到", "这个角度我真没想到", "这个角度真没想到",
+        )),
+        ("PERSPECTIVE_SURPRISE", (0.02, 0.03, 0.0), (
+            "这个思路让我眼前一亮",
+        )),
+        ("VIEW_DISAGREEMENT", (0.0, 0.01, 0.0), (
+            "这个观点我不认同", "我对这个观点有不同看法", "这个观点我有不同看法",
+            "我不太同意这个看法",
+        )),
+        ("DISCUSSION_PROGRESS", (0.025, 0.0, 0.025), (
+            "这个问题终于理清了", "这样就说得通了", "这次讨论有进展了",
+            "我们把这个问题说清楚了",
+        )),
+    )
+    for text in texts
+    for ending in ("", "，我们继续聊聊", "，想再听听你的看法")
+}
+CHAT_SIGNALS = FEEDBACK | INTERACTIONS
 FILTER_RULES = (
     "这是小肥鱼自身的暂时表达参考，不是主人的情绪、固定人格或真实情绪体验的证明。"
     "仅可轻微影响措辞、关注点和表达意愿；不必提心情或每轮表演感受，不指定回复。"
@@ -198,7 +231,7 @@ class MoodService:
             "SELECT g.result_event_id,g.updated_at,'goal' FROM goals g WHERE g.state='DONE' "
             "AND g.redacted=0 AND g.result_event_id IS NOT NULL AND g.updated_at>? "
             "AND g.updated_at<=? ORDER BY at DESC,event_id,kind LIMIT ?",
-            (cutoff, at, cutoff, at, encode(list(FEEDBACK)), cutoff, at, cutoff, at, LIMIT + 1),
+            (cutoff, at, cutoff, at, encode(list(CHAT_SIGNALS)), cutoff, at, cutoff, at, LIMIT + 1),
         )
         signals, used = [], set()
         for candidate in candidates[:LIMIT]:
@@ -225,7 +258,8 @@ class MoodService:
                 text = body.get("text", "")
                 if not isinstance(text, str):
                     continue
-                rule = FEEDBACK.get(text.strip().rstrip("。！! "))
+                utterance = text.strip().rstrip("。！! ")
+                rule = CHAT_SIGNALS.get(utterance)
                 if not rule:
                     continue
                 # Feedback refers to an actual delivered reply in this conversation.
@@ -253,6 +287,24 @@ class MoodService:
                 )
                 if uncertain:
                     continue
+                if utterance in INTERACTIONS:
+                    if body.get("media") or body.get("shared_content"):
+                        continue
+                    # Deictic phrases such as "this idea" need a recent, adjacent
+                    # delivered turn. Never guess across a later topic or a gap.
+                    preceding = s.one(
+                        "SELECT event_id FROM events WHERE conversation_id=? "
+                        "AND source='qq.onebot' AND actor_id='owner' "
+                        "AND event_type IN ('message.received','message.media_received') "
+                        "AND rowid<(SELECT rowid FROM events WHERE event_id=?) "
+                        "ORDER BY rowid DESC LIMIT 1", (event["conversation_id"], key),
+                    )
+                    elapsed = (datetime.fromisoformat(candidate["at"])
+                               - datetime.fromisoformat(reply["sent_at"])).total_seconds()
+                    if (not preceding or preceding["event_id"] != reply["origin_event_id"]
+                        or not 0 <= elapsed <= INTERACTION_REPLY_WINDOW):
+                        continue
+                    kind = "interaction"
                 lineage += prior
                 identity = "reply:" + reply["message_id"]
                 detail, reason, delta = sha(reply), rule[0], rule[1]
@@ -338,9 +390,12 @@ class MoodService:
                 "independent_id": identity,
                 "fingerprint": sha([lineage, detail]),
             }
-            if (kind, identity) not in used:
+            # Help feedback and discussion appraisals about the same delivered
+            # reply are one experience, even when their reason codes differ.
+            category = "feedback" if kind == "interaction" else kind
+            if (category, identity) not in used:
                 signals.append(signal)
-                used.add((kind, identity))
+                used.add((category, identity))
         # The same observation's review and verified goal result form one bounded impulse.
         merged = {}
         for item in signals:

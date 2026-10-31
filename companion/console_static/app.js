@@ -2632,6 +2632,9 @@ function affectSheet(a) {
 }
 const MOOD_REASONS = { HELPFUL_FEEDBACK: "明确的正向互动反馈", THANKS_FOR_HELP: "对已送达帮助的感谢",
   UNHELPFUL_FEEDBACK: "明确的改进反馈", COMPLETED_READ_REVIEW: "完成线上阅读后的评价",
+  SHARED_IDEA_INTEREST: "主人明确觉得刚才的想法有趣", DISCUSSION_CURIOSITY: "主人明确想继续探讨问题",
+  PERSPECTIVE_SURPRISE: "刚才的新角度带来明确反馈", VIEW_DISAGREEMENT: "主人明确提出观点分歧",
+  DISCUSSION_PROGRESS: "主人明确反馈讨论有进展",
   VERIFIED_GOAL_COMPLETION: "有执行证据的目标完成", REVIEWED_GOAL_COMPLETION: "完成目标与阅读评价" };
 const padText = value => ["pleasure", "arousal", "dominance"].map(k => Number(value?.[k] || 0).toFixed(3)).join(" / ");
 function moodSheet(m) {

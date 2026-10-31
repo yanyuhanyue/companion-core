@@ -14,7 +14,14 @@ from tests.support.native_consumer_entry import environment
 
 
 @pytest.mark.parametrize("hot_reload", [False, True])
-def test_native_chat_worker_carries_mood_through_neutral_chat_and_hours(core, tmp_path, hot_reload):
+@pytest.mark.parametrize("appraisal,pleasure,arousal,reason", [
+    ("这个回答很有帮助", .08, .02, "HELPFUL_FEEDBACK"),
+    ("这个想法很有意思，我们继续聊聊", .025, .02, "SHARED_IDEA_INTEREST"),
+    ("这个观点我不认同", 0, .01, "VIEW_DISAGREEMENT"),
+])
+def test_native_chat_worker_carries_mood_through_neutral_chat_and_hours(
+    core, tmp_path, hot_reload, appraisal, pleasure, arousal, reason,
+):
     core.settings.operator_hot_reload = hot_reload
     workspace = Path(__file__).resolve().parents[1]
 
@@ -51,14 +58,17 @@ def test_native_chat_worker_carries_mood_through_neutral_chat_and_hours(core, tm
             assert (await entry.send(entry.client, entry.protocol))["worked"]
             assert len(sends) == 1
             core.clock.advance(1)
-            await entry.admit(2, "这个回答很有帮助")
+            await entry.admit(2, appraisal)
             positive = await worker("feedback")
-            assert positive[0]["state"]["pleasure"] == .08
+            assert positive[0]["state"]["pleasure"] == pleasure
+            assert positive[0]["state"]["arousal"] == arousal
+            assert positive[0]["causes"][0]["reason"] == reason
             assert (await entry.send(entry.client, entry.protocol))["worked"]
             core.clock.advance(3 * 3600)
             await entry.admit(3, "聊一聊今天的阅读吧")
             carried = await worker("hours-later")
-            assert carried[0]["state"]["pleasure"] == pytest.approx(.04, abs=1e-6)
+            assert carried[0]["state"]["pleasure"] == pytest.approx(pleasure / 2, abs=1e-6)
+            assert carried[0]["state"]["arousal"] == pytest.approx(arousal / 2, abs=1e-6)
             assert (await entry.send(entry.client, entry.protocol))["worked"]
             assert len(sends) == 3
             assert core.store.one("SELECT COUNT(*) n FROM model_usage")["n"] == 3

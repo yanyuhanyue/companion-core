@@ -35,6 +35,12 @@ def test_mood_console_shows_sources_trend_and_controls(core, tmp_path):
 
     core.clock.now = datetime.now(UTC)
     feedback(core)
+    for number, text in enumerate((
+        "这个想法很有意思", "这个问题让我很好奇", "这个角度我真没想到",
+        "这个观点我不认同", "这样就说得通了",
+    ), 2):
+        core.clock.advance(1)
+        feedback(core, number, text)
     directory = Path(__file__).parents[1] / ".local/test-results"
     directory.mkdir(parents=True, exist_ok=True)
 
@@ -48,6 +54,10 @@ def test_mood_console_shows_sources_trend_and_controls(core, tmp_path):
             assert "半衰期 3 小时" in await card.inner_text()
             await card.get_by_text("最近趋势与变化来源", exact=True).click()
             assert "明确的正向互动反馈" in await card.inner_text()
+            for reason in ("主人明确觉得刚才的想法有趣", "主人明确想继续探讨问题",
+                           "刚才的新角度带来明确反馈", "主人明确提出观点分歧",
+                           "主人明确反馈讨论有进展"):
+                assert reason in await card.inner_text()
             await page.screenshot(path=str(directory / "mood-console-desktop.png"), full_page=True)
             for label in ("暂停心情滤镜", "恢复心情滤镜", "重新计算心情"):
                 await page.get_by_role("button", name=label, exact=True).click()
