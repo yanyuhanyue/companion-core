@@ -1,11 +1,27 @@
 """Model-judged interaction signals from owner's natural language."""
 
-import pytest
-
 from companion import mood_appraisals
 from companion.contracts import InteractionSignal
 from tests.conftest import ingest
 from tests.test_mood import erase, feedback
+
+
+def appraise(core, number, text, reason="OWNER_AFFECTION"):
+    """A retained owner source and settled extraction, through the real record boundary."""
+    core.settings.mood_enabled = True
+    key = ingest(core, number, text)["event_id"]
+    request_id = f"appraisal_{number}"
+    core.store.execute(
+        "INSERT INTO model_usage (request_id,scenario,provider,model,state,input_tokens,"
+        "output_tokens,occurred_at) VALUES (?, 'memory_extract','synthetic','synthetic',"
+        "'SETTLED',100,20,?)", (request_id, core.clock()),
+    )
+    signals = mood_appraisals.validate(core.store, [
+        InteractionSignal(event_id=key, reason=reason, quote=text),
+    ], {key})
+    with core.store.transaction():
+        mood_appraisals.record(core.store, core.settings, signals, request_id, core.clock())
+    return key
 
 
 def test_reasons_have_small_pad_deltas():
@@ -128,9 +144,11 @@ def test_record_writes_to_mood_appraisals_table(core):
 
     # Create model_usage record for FK constraint
     core.store.execute(
-        "INSERT INTO model_usage (request_id, scenario, provider, model, state, input_tokens, output_tokens, occurred_at) "
+        "INSERT INTO model_usage (request_id,scenario,provider,model,state,input_tokens,"
+        "output_tokens,occurred_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        ("test_request", "memory_extract", "synthetic", "synthetic", "SETTLED", 100, 20, core.clock()),
+        ("test_request", "memory_extract", "synthetic", "synthetic", "SETTLED",
+         100, 20, core.clock()),
     )
 
     with core.store.transaction():
@@ -171,9 +189,11 @@ def test_erase_removes_appraisals_by_event_ids(core):
 
     # Create model_usage record
     core.store.execute(
-        "INSERT INTO model_usage (request_id, scenario, provider, model, state, input_tokens, output_tokens, occurred_at) "
+        "INSERT INTO model_usage (request_id,scenario,provider,model,state,input_tokens,"
+        "output_tokens,occurred_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        ("test_request", "memory_extract", "synthetic", "synthetic", "SETTLED", 100, 20, core.clock()),
+        ("test_request", "memory_extract", "synthetic", "synthetic", "SETTLED",
+         100, 20, core.clock()),
     )
 
     for event_id, quote in [("evt_test_1", "first"), ("evt_test_2", "second")]:
@@ -209,9 +229,11 @@ def test_still_valid_checks_quote_and_source_retention(core):
 
     # Create model_usage record
     core.store.execute(
-        "INSERT INTO model_usage (request_id, scenario, provider, model, state, input_tokens, output_tokens, occurred_at) "
+        "INSERT INTO model_usage (request_id,scenario,provider,model,state,input_tokens,"
+        "output_tokens,occurred_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        ("test_request", "memory_extract", "synthetic", "synthetic", "SETTLED", 100, 20, core.clock()),
+        ("test_request", "memory_extract", "synthetic", "synthetic", "SETTLED",
+         100, 20, core.clock()),
     )
 
     with core.store.transaction():
@@ -234,9 +256,11 @@ def test_capped_enforces_daily_limit_per_reason(core):
 
     # Create model_usage record
     core.store.execute(
-        "INSERT INTO model_usage (request_id, scenario, provider, model, state, input_tokens, output_tokens, occurred_at) "
+        "INSERT INTO model_usage (request_id,scenario,provider,model,state,input_tokens,"
+        "output_tokens,occurred_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        ("test_request", "memory_extract", "synthetic", "synthetic", "SETTLED", 100, 20, core.clock()),
+        ("test_request", "memory_extract", "synthetic", "synthetic", "SETTLED",
+         100, 20, core.clock()),
     )
 
     for i in range(5):

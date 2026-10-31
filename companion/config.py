@@ -60,6 +60,8 @@ class ObservationAdapterConfig(BaseModel):
 
     @model_validator(mode="after")
     def recommendation_requires_account(self):
+        if self.source == "qzone" and (not self.source_grant_required or self.media_analysis):
+            raise ValueError("QZone requires an explicit account grant and text-only evidence")
         if self.bilibili_discovery == "recommend" and (
             self.source != "bilibili" or not self.source_grant_required
             or self.reader_max_requests < 2
@@ -521,6 +523,7 @@ class Settings(BaseModel):
     media: MediaConfig = Field(default_factory=MediaConfig)
     content_enabled: bool = False
     web_reading_enabled: bool = False
+    qzone_reading_enabled: bool = Field(default=False, exclude_if=lambda value: not value)
     # Exact public hosts the web reader may fetch, including every redirect hop.
     web_reading_hosts: tuple[str, ...] = Field(default=(), max_length=32)
     content: ContentConfig = Field(default_factory=ContentConfig)

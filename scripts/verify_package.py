@@ -19,6 +19,7 @@ FORBIDDEN = {
     ".venv",
     ".env",
     "config.toml",
+    "gateway.toml",
     "data",
     "privacy",
     "backups",
@@ -54,6 +55,7 @@ def verify_export_rebuild(source, temporary):
         for name in (
             ".env",
             "config.toml",
+            "gateway.toml",
             ".local/canary.txt",
             "data/canary.sqlite3",
             "privacy/canary.jsonl",

@@ -717,6 +717,11 @@ textarea.serif { font-family: var(--serif); font-size: 15px; line-height: 1.9; }
 dialog.wide { width: min(760px, calc(100vw - 32px)); }
 .dlg-form { display: grid; gap: 14px; }
 .dlg-form > p { font-size: 13px; }
+.publication-review, .publication-review .stack { min-width: 0; grid-template-columns: minmax(0, 1fr); }
+.publication-review .note { overflow-wrap: anywhere; }
+.publication-review small { display: block; }
+.publication-review .dlg-acts { flex-wrap: wrap; }
+.publication-review .kv > span:last-child { min-width: 0; overflow-wrap: anywhere; text-align: right; }
 .form-error { color: var(--rose); font-size: 12.5px; }
 .mode-item { border: 1px solid var(--line); border-radius: 10px; transition: border-color .15s, background .15s; }
 .mode-item:has(.mode-row.changed) { border-color: var(--ink); background: #f6f7fb; }

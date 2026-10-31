@@ -230,6 +230,7 @@ async def run_once(store, settings, model, clock=utcnow, *, worker_id="social-wo
     ready = store.one("SELECT p.plan_id FROM social_autonomy_plans p WHERE p.state='READY' "
                       "AND p.redacted=0 AND NOT EXISTS (SELECT 1 FROM "
                       "social_autonomy_reservations r WHERE r.plan_id=p.plan_id) "
+                      "AND json_extract(p.plan_json,'$.schema_version')<>2 "
                       "ORDER BY p.created_at,p.plan_id LIMIT 1")
     if ready:
         return _enqueue(module, ready["plan_id"], conversation) or changed

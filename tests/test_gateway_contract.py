@@ -288,7 +288,7 @@ def contract_payload():
     {"enabled": True}, {"enabled": 0}, {"bind_host": "0.0.0.0"},
     {"schema_version": True}, {"schema_version": 2},
 ])
-def test_g0_contract_cannot_enable_a_public_or_live_gateway(changes):
+def test_schema_catalog_cannot_be_used_as_listener_configuration(changes):
     with pytest.raises(ValidationError):
         GatewayContract.model_validate({**contract_payload(), **changes})
 
@@ -304,11 +304,13 @@ def test_exported_schema_matches_types_and_covers_wire_input():
         assert list(chat.iter_errors({**request().model_dump(mode="json"), **changes}))
 
 
-def test_openapi_defines_only_future_authenticated_text_endpoints():
+def test_openapi_defines_authenticated_nonstreaming_text_and_receipts():
     spec = yaml.safe_load((ROOT / "contracts/universal-gateway.openapi.yaml").read_text("utf-8"))
     assert spec["openapi"] == "3.1.0"
-    assert spec["x-implementation-stage"] == "G0-contract-only"
-    assert set(spec["paths"]) == {"/v1/models", "/v1/chat/completions"}
+    assert spec["x-implementation-stage"] == "G1a-passthrough"
+    assert set(spec["paths"]) == {
+        "/v1/models", "/v1/chat/completions", "/v1/gateway/requests/{request_id}",
+    }
     assert spec["security"] == [{"GatewayClientKey": []}]
     assert spec["components"]["securitySchemes"]["GatewayClientKey"]["scheme"] == "bearer"
     post = spec["paths"]["/v1/chat/completions"]["post"]
@@ -344,7 +346,8 @@ class NoRuntime(importlib.abc.MetaPathFinder):
             raise AssertionError('runtime dependency: ' + fullname)
 sys.meta_path.insert(0, NoRuntime())
 from companion.gateway_contract import GatewayContract
-assert GatewayContract.model_json_schema()['properties']['enabled']['const'] is False
+schema = GatewayContract.model_json_schema()
+assert schema['$defs']['RouteIntent']['properties']['dispatch_allowed']['const'] is False
 """
     result = subprocess.run([sys.executable, "-B", "-c", script], cwd=tmp_path,
                             capture_output=True, text=True, timeout=30)

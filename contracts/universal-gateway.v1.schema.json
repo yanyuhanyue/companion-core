@@ -599,26 +599,12 @@
     }
   },
   "additionalProperties": false,
+  "description": "Schema catalog. Runtime listener configuration belongs to GatewayConfig.",
   "properties": {
     "schema_version": {
       "const": 1,
       "title": "Schema Version",
       "type": "integer"
-    },
-    "enabled": {
-      "const": false,
-      "default": false,
-      "title": "Enabled",
-      "type": "boolean"
-    },
-    "bind_host": {
-      "default": "127.0.0.1",
-      "enum": [
-        "127.0.0.1",
-        "::1"
-      ],
-      "title": "Bind Host",
-      "type": "string"
     },
     "client_grant": {
       "$ref": "#/$defs/ClientGrant"

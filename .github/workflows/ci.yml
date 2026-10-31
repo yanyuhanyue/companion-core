@@ -445,7 +445,8 @@ jobs:
         run: >-
           uv run --group reader python -m pytest -q tests/test_source_browser.py
           tests/test_next_reading_browser.py tests/test_console_frontend.py tests/test_console_browser.py
-          tests/test_console_supplement_browser.py --basetemp=.local/test-temp
+          tests/test_console_supplement_browser.py tests/test_qzone_publication_browser.py
+          --basetemp=.local/test-temp
       - name: Validate console interactions
         if: ${{ !fromJSON(needs.preflight.outputs.windows).product }}
         run: >-

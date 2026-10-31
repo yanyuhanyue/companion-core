@@ -98,6 +98,8 @@ expression_enabled = false
 expression_learning_enabled = false
 content_enabled = false
 web_reading_enabled = false
+# Later-stage, explicitly authorized QZone latest-text reader; keep disabled in M0/M1.
+qzone_reading_enabled = false
 # Exact public hosts for web reading; editable in the owner console.
 web_reading_hosts = []
 expression_cooldown_minutes = 30
@@ -282,6 +284,8 @@ scope = "none"
 # Both hashes must refer to actual approved scope/review evidence in the signed plan.
 policy_version = 1
 qzone_enabled = false
+# Public text publication additionally requires the qzone_publication owner purpose and exact review.
+qzone_public_enabled = false
 nickname_enabled = false
 signature_enabled = false
 avatar_enabled = false

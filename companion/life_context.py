@@ -39,6 +39,8 @@ def decision_context(store, settings, sources, authority_sha256, now, *, mood_at
     """Read only evidence already admitted into this exact activity's source set."""
     ids = {source["event_id"] for source in sources}
     result = {"owner_feedback": [], "self_interests": [], "execution_outcomes": []}
+    if any(source.get("kind") == "social_content" for source in sources):
+        return result
     if settings.mood_enabled:
         from companion.mood import service_for_store
 

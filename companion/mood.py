@@ -456,9 +456,10 @@ class MoodService:
                 prior["reason"], prior["kind"] = "REVIEWED_GOAL_COMPLETION", "experience"
             else:
                 merged[key] = item
-        return sorted(
+        ordered = sorted(
             merged.values(), key=lambda item: (item["at"], item["event_id"], item["kind"])
-        ), len(candidates) > LIMIT
+        )
+        return ordered[-LIMIT:], len(candidates) > LIMIT or len(ordered) > LIMIT
 
     def _appraisals(self, at, allowed, cutoff, sources, taken):
         """Model-judged owner wording; an exact-phrase signal on the same message wins."""

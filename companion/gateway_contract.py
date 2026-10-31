@@ -224,9 +224,9 @@ def route_intent(grant: ClientGrant, alias: ModelAlias, request: ChatRequest,
 
 
 class GatewayContract(Contract):
+    """Schema catalog. Runtime listener configuration belongs to GatewayConfig."""
+
     schema_version: Literal[1]
-    enabled: Disabled = False
-    bind_host: Literal["127.0.0.1", "::1"] = "127.0.0.1"
     client_grant: ClientGrant
     model_alias: ModelAlias
     request_context: RequestContext

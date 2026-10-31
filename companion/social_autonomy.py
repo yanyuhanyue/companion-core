@@ -25,6 +25,7 @@ from companion.social_autonomy_protocol import (
     FrozenPlan,
     OwnerAudience,
     ProfileBaseline,
+    PublicAudience,
     Publish,
     ReviewedAvatar,
     SetAvatar,
@@ -458,6 +459,10 @@ class SocialAutonomy:
                        (SCENARIO,))["at"]
         if latest and _instant(now) < _instant(after(latest, cfg.decision_interval_seconds)):
             raise CoreError("SOCIAL_DECISION_COOLDOWN", 429)
+        self._pending_room(cfg, now, excluding=excluding)
+
+    def _pending_room(self, cfg, now, *, excluding=None):
+        s = self.store
         pending = s.one(
             "SELECT COUNT(*) n FROM social_autonomy_plans p WHERE p.plan_id<>? "
             "AND p.redacted=0 AND p.expires_at>? AND ((p.state='READY' AND NOT EXISTS "
@@ -808,12 +813,18 @@ class SocialAutonomy:
                 or not original.get("profile_material")
                 or original["sources"] or original["assets"]):
                 raise CoreError("SOCIAL_PROFILE_PURPOSE_REQUIRED", 403)
-        current = self._context(
-            [source["ref"] for source in original["sources"]],
-            [asset["asset_id"] for asset in original["assets"]],
-            [profile["field"] for profile in original["profiles"]], ignore_plan=plan_id,
-            profile_memory_ids=[item["memory_id"] for item in original.get("profile_material", [])],
-        )
+        if "publication_review" in original:
+            from companion.qzone_publication import context as publication_context
+
+            current = publication_context(self, original["publication_review"]["job_id"])
+        else:
+            current = self._context(
+                [source["ref"] for source in original["sources"]],
+                [asset["asset_id"] for asset in original["assets"]],
+                [profile["field"] for profile in original["profiles"]], ignore_plan=plan_id,
+                profile_memory_ids=[item["memory_id"]
+                                    for item in original.get("profile_material", [])],
+            )
         if "life_result" in original:
             try:
                 data, proof = self._life_draft(original["life_result"]["job_id"])
@@ -895,6 +906,10 @@ class SocialAutonomy:
             if isinstance(proposal, Publish) else None,
             "expires_at": row["expires_at"],
         }
+        if "publication_review" in context:
+            if not isinstance(proposal, Publish):
+                raise CoreError("QZONE_PUBLICATION_REQUIRED", 403)
+            material.update(schema_version=2, audience=PublicAudience().model_dump())
         return FrozenPlan.model_validate({**material, "payload_sha256": _sha(material)})
 
     def _frozen(self, row):
@@ -976,6 +991,10 @@ class SocialAutonomy:
         if not row or row["state"] != "READY" or row["redacted"]:
             raise CoreError("SOCIAL_PLAN_UNAVAILABLE", 409)
         frozen = self._frozen(row)
+        if frozen.schema_version == 2:
+            from companion.qzone_publication import require_approval
+
+            require_approval(self, row, frozen)
         previous = s.one("SELECT o.* FROM social_autonomy_reservations r JOIN outbox o "
                          "USING(message_id) WHERE r.plan_id=?", (plan_id,))
         if previous:
@@ -1033,6 +1052,10 @@ class SocialAutonomy:
             raise CoreError("SOCIAL_RESERVATION_REQUIRED", 403)
         row = self._validate_plan(reservation["plan_id"], current_delivery=message_id)
         frozen = self._frozen(row)
+        if frozen.schema_version == 2:
+            from companion.qzone_publication import require_approval
+
+            require_approval(self, row, frozen)
         native = s.one("SELECT o.*,c.platform,c.platform_session_key,c.scope,c.owner_actor_id "
                        "FROM outbox o JOIN conversations c USING(conversation_id) "
                        "WHERE o.message_id=?", (message_id,))

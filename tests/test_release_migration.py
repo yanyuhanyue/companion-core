@@ -81,6 +81,8 @@ REVISION_CHAIN = (
     "0056_watch_ledger_goal_reads",
     "0057_expression_configuration",
     "0058_bili_discovery",
+    "0059_gateway",
+    "0060_mood_appraisals",
 )
 LEGACY_TABLES = (
     "principals",

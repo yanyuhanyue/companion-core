@@ -56,7 +56,9 @@ def validate(item, config):
             or any(field in item for field in ("reply_segment", "reply_revision", "window_notice"))
             or item.get("conversation_platform_session_key") != config.origin
             or not isinstance(plan, dict) or set(plan) != FIELDS
-            or type(plan["schema_version"]) is not int or plan["schema_version"] != 1
+            or type(plan["schema_version"]) is not int or plan["schema_version"] not in {1, 2}
+            or plan["schema_version"] == 2 and plan["action_type"] != "qzone.publish"
+            or plan["schema_version"] == 2 and "authority" not in item
             or type(plan["policy_version"]) is not int or plan["policy_version"] < 1
             or not isinstance(plan["plan_id"], str)
             or not re.fullmatch(r"social_[a-f0-9]{32}", plan["plan_id"])
@@ -76,6 +78,8 @@ def validate(item, config):
         if not isinstance(proposal, dict) or proposal.get("kind") != kind:
             raise ValueError()
         if kind == "qzone_publish":
+            audience = ({"ugc_right": 1, "target_uins": []} if plan["schema_version"] == 2
+                        else {"ugc_right": 16, "target_uins": [config.owner_qq_id]})
             if (set(proposal) != {"kind", "text", "source_refs"}
                 or not _text(proposal["text"], 5000)
                 or not isinstance(proposal["source_refs"], list)
@@ -83,7 +87,7 @@ def validate(item, config):
                 or any(not isinstance(value, str) or not REF.fullmatch(value)
                        for value in proposal["source_refs"])
                 or len(set(proposal["source_refs"])) != len(proposal["source_refs"])
-                or plan["audience"] != {"ugc_right": 16, "target_uins": [config.owner_qq_id]}
+                or plan["audience"] != audience
                 or type(plan["audience"]["ugc_right"]) is not int
                 or plan["profile_baseline_sha256"] is not None or plan["asset_sha256"] is not None):
                 raise ValueError()
@@ -112,6 +116,8 @@ def native_body(plan, asset=None):
     proposal = plan["proposal"]
     match plan["action_type"]:
         case "qzone.publish":
+            if plan["schema_version"] == 2:
+                return {"content": proposal["text"], "ugc_right": 1}
             return {"content": proposal["text"], "ugc_right": 16,
                     "target_uins": [int(plan["owner_qq_id"])]}
         case "qq.profile.nickname":

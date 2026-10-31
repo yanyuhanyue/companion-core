@@ -352,19 +352,9 @@ def test_actual_pre0048_encrypted_snapshot_migrates_before_latest_ledger_replay(
     freeze(c, monkeypatch)
     before = c.core.store.rows("SELECT * FROM model_usage")
     legacy = tmp_path / "pre0048.sqlite3"
-    with closing(Store(str(legacy))) as store:
-        c.core.store.db.backup(store.db)
-        store.execute("DROP TABLE operator_task_configuration")
-        store.execute("DROP TABLE operator_runtime_snapshots")
-        store.execute("DROP TABLE meme_vectors")
-        store.execute("DROP TABLE watch_ledger")  # Added after 0047 too.
-        store.execute("ALTER TABLE exploration_requests DROP COLUMN discovery_mode")
-        store.execute("ALTER TABLE exploration_requests DROP COLUMN query")
-        store.execute("DROP TABLE style_candidates")
-        store.execute("DROP TABLE style_pairs")
-        store.execute("DROP TABLE jargon_work")
-        store.execute("DROP TABLE jargon_terms")
-        store.execute("UPDATE alembic_version SET version_num='0047_meme_assets'")
+    from tests.test_test_fixtures import historical_database
+
+    historical_database(c.core.store, legacy, "0047_meme_assets")
     archive, restored, key = (
         tmp_path / "pre0048.enc",
         tmp_path / "restored.sqlite3",
@@ -377,7 +367,7 @@ def test_actual_pre0048_encrypted_snapshot_migrates_before_latest_ledger_replay(
     with closing(Store(str(restored))) as store:
         assert (
             store.one("SELECT version_num FROM alembic_version")["version_num"]
-            == "0058_bili_discovery"
+            == "0060_mood_appraisals"
         )
         assert not store.rows("SELECT * FROM meme_vectors")
         assert store.one("SELECT state FROM meme_assets")["state"] == "ERASED"

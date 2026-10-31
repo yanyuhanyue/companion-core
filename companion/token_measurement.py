@@ -146,6 +146,8 @@ def _exact_supported(config, provider, endpoint, payload):
     ):
         return "route_mismatch"
     fields = {"model", "messages", "max_tokens", "stream", "thinking"}
+    if "temperature" in payload:
+        fields.add("temperature")
     if payload.get("thinking") == {"type": "enabled"}:
         fields.add("reasoning_effort")
     tools = payload.get("tools")
@@ -167,7 +169,7 @@ def _exact_supported(config, provider, endpoint, payload):
     return None
 
 
-def measure_payload(settings, payload, scenario, *, tools=()):
+def measure_payload(settings, payload, scenario, *, tools=(), generation=None):
     """Measure the same complete generated payload used by admission and model transport.
 
     Provider-count is a distinct evidence kind; no remote backend is enabled here.
@@ -178,7 +180,7 @@ def measure_payload(settings, payload, scenario, *, tools=()):
 
     messages = payload.get("messages")
     if not isinstance(messages, list) or payload != model_payload(
-        settings, messages, scenario, tools=tools):
+        settings, messages, scenario, tools=tools, generation=generation):
         raise CoreError("MODEL_TOKEN_PAYLOAD_INVALID", 503)
     approval = settings.paid_model
     provider, _, endpoint = model_route(settings, scenario)
@@ -240,8 +242,8 @@ def measure_payload(settings, payload, scenario, *, tools=()):
                        reservation_margin=reserved - tokens, method=method, reason=reason)
 
 
-def measure_request(settings, messages, scenario="chat", *, tools=()):
+def measure_request(settings, messages, scenario="chat", *, tools=(), generation=None):
     from companion.model import model_payload
 
-    return measure_payload(settings, model_payload(settings, messages, scenario, tools=tools),
-                           scenario, tools=tools)
+    return measure_payload(settings, model_payload(settings, messages, scenario, tools=tools,
+                           generation=generation), scenario, tools=tools, generation=generation)
