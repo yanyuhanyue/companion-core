@@ -73,6 +73,12 @@ embedding 接口不接受任意调用方文本；Core 使用持久化成功 capt
 此时 `run_discovery` 把素材列在 `pending_caption` 中，不把尚未识别的图算成 `accepted`。
 普通合格图在 caption 通过后自动成为 `READY`，无需逐张询问主人。
 
+空目录的后台发现不依赖可选的前台候选查询成功。查询超时或未能冻结 offer 时，
+MemePump 等原回复完成后，从同一条已接纳且摘要匹配的主人输入提取已有七类意图，
+通过原 discovery submit 接口补充素材；不补写本轮 offer，也不改变已生成的回复。
+无意图、严肃/拒绝图片的输入以及已有活跃素材的目录不会走此空库补充路径。
+新输入、撤回、STOP、版本、来源审核和预算继续由原检查拒绝；素材可用于后续轮次。
+
 启用 semantics 后，`TrustedReviewer` 先做来源审核，允许合格但尚无 caption 的素材暂存；
 许可文件、固定版本、实际 acquisition/hash 检查保持。caption 的置信度或内容判断
 永远不能批准来源。下载费用必须已结算，下载结果 UNKNOWN 不会继续发起付费识图。

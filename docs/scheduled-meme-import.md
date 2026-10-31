@@ -1,98 +1,44 @@
-# 定时表情包导入
+# 定时回填与表情包入库
 
-## 功能说明
+`scheduled_meme_import_enabled` 保留每日历史回填任务。它补收 WebSocket 断线期间遗漏的
+主人消息，复用原签名捕获和 Core 接纳；素材获取、识图与发送由 MemePump 和 Core 完成。
 
-每天自动扫描主人的私聊历史消息，将包含图片的消息导入到表情包发现队列，复用现有的 discovery 预算和策略。
+回填仍受当前主人授权、最近 20 条记录和原 30 秒新鲜度限制。它不会把旧聊天图片或
+`/memes` 下的文件直接变成可发送素材，也不会为缺少来源证明的图片创建识图任务。
 
-## 工作原理
-
-- **触发时间**：每天凌晨 03:30（本地时间）
-- **扫描机制**：复用 bridge 的 `history_backfill` 功能
-- **预算管理**：使用现有的 `discovery_daily_budget`，不修改账号策略
-- **去重保证**：Core 自动识别重复素材，不会重复导入
-
-## 配置
-
-在 `bridge.toml` 中添加或修改：
+## 配置与时间
 
 ```toml
-# 启用定时导入（默认 true）
 scheduled_meme_import_enabled = true
-
-# 必须启用历史回填功能
 history_backfill = true
-
-# 表情包功能需要开启
 meme_enabled = true
+meme_semantics_enabled = true
 meme_discovery_enabled = true
 ```
 
-## 禁用定时导入
+任务每天在 Bridge 进程本地时间 03:30 运行。生产容器使用 UTC 时，对应北京时间 11:30；
+Core 的 `timezone` 不会改变 Bridge 进程时区。配置修改后按现有发布流程重启 Bridge。
 
-如果需要临时关闭，设置：
+## 素材入库与发送
 
-```toml
-scheduled_meme_import_enabled = false
-```
+当前已认证的主人消息包含支持的表情意图，且没有可用候选时，后台通过原 discovery
+任务从已批准的社区来源获取图片。语义目录为空时，即使前台候选查询失败，原回复完成后
+也能从同一条已接纳消息启动发现，不会让空库一直等待一次成功的前台查询。
 
-重启 bridge 后生效。
+图片经过来源与许可审核、下载用量结算、Core 原生 caption job、模型费用结算和本地
+索引后，才可在后续聊天轮次进入候选。发送仍经过原 Outbox、概率、冷却和平台 ACK。
+预算不足、来源不符、没有合适候选或主人拒绝图片时继续文字回复。
 
-## 状态追踪
+详细合同见[表情入库识图与聊天检索](qq-beta/memes-semantic.md)。
 
-导入状态记录在 `companion_onebot_bridge/state/meme_import_state.json`：
+## 回填状态
+
+成功回填状态保存在 Bridge 可写的 `data_dir/meme_import_state.json`，不写只读安装目录：
 
 ```json
-{
-  "last_scan_time": "2026-10-31T03:30:00+00:00",
-  "total_runs": 15
-}
+{"last_scan_time": "2026-10-31T03:30:00+00:00", "total_runs": 1}
 ```
 
-- `last_scan_time`：上次扫描时间
-- `total_runs`：累计执行次数
-
-## 日志监控
-
-每次扫描会记录日志：
-
-```
-INFO: Starting scheduled meme import via backfill (run #15)
-INFO: Scheduled import completed: 3 messages backfilled
-```
-
-失败时会记录错误：
-
-```
-ERROR: Scheduled import failed: <error details>
-```
-
-## 注意事项
-
-1. **预算限制**：如果当天 discovery 预算已用完，扫描会停止
-2. **不影响即时回复**：定时任务在后台独立运行
-3. **回填窗口**：只扫描最近 20 条历史消息（backfill 的默认设置）
-4. **首次运行**：会尝试导入历史消息，后续每天增量扫描
-5. **失败处理**：单次失败不影响次日执行
-
-## 手动测试
-
-修改定时时间为 1 分钟后：
-
-```python
-# 在 scheduled_import.py 中临时修改
-schedule.every().day.at("15:35").do(job)  # 改为当前时间+1分钟
-```
-
-观察日志输出验证功能正常。
-
-## 依赖
-
-- `schedule>=1.2,<2` (已添加到 pyproject.toml)
-- 已配置的 OneBot 实例
-- Core API 可访问
-
-## 与其他功能的关系
-
-- **history_backfill**：共享底层回填逻辑
-- **meme_discovery**：共享预算和去重机制
-- **continuous replies**：不冲突，独立运行
+这只说明历史回填完成，不证明素材已入库或图片已发送。回填返回 `UNAVAILABLE` 时保留
+上次成功状态。实际验收应分别检查 discovery 结算、caption 成功与费用、语义素材和
+向量，以及图片 Outbox 的平台 ACK。

@@ -1,8 +1,4 @@
-"""Scheduled meme import by triggering periodic backfill.
-
-Calls backfill daily to import owner's recent images into meme discovery queue.
-Reuses existing authenticated capture and Core admission logic without changes.
-"""
+"""Scheduled authenticated history backfill; asset acquisition stays in MemePump."""
 
 import asyncio
 import json
@@ -14,22 +10,21 @@ import schedule
 
 logger = logging.getLogger(__name__)
 
-STATE_FILE = Path(__file__).parent / "state" / "meme_import_state.json"
-
 
 class ImportState:
     """Track scheduled import runs."""
 
-    def __init__(self):
+    def __init__(self, directory):
+        self.path = Path(directory) / "meme_import_state.json"
         self.last_scan_time = None
         self.total_runs = 0
 
     @classmethod
-    def load(cls):
-        state = cls()
-        if STATE_FILE.exists():
+    def load(cls, directory):
+        state = cls(directory)
+        if state.path.exists():
             try:
-                data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+                data = json.loads(state.path.read_text(encoding="utf-8"))
                 if data.get("last_scan_time"):
                     state.last_scan_time = datetime.fromisoformat(data["last_scan_time"])
                 state.total_runs = data.get("total_runs", 0)
@@ -38,23 +33,27 @@ class ImportState:
         return state
 
     def save(self):
-        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         data = {
             "last_scan_time": self.last_scan_time.isoformat() if self.last_scan_time else None,
             "total_runs": self.total_runs,
         }
-        STATE_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        self.path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 async def run_scheduled_backfill(runtime, core, onebot, wake):
-    """Execute scheduled backfill to import recent images."""
+    """Execute backfill within its original capture freshness and authority bounds."""
     from .backfill import backfill
 
-    state = ImportState.load()
+    state = ImportState.load(runtime.spool.directory)
     logger.info(f"Starting scheduled meme import via backfill (run #{state.total_runs + 1})")
 
     try:
-        added = (await backfill(runtime, core, onebot, wake))["added"]
+        report = await backfill(runtime, core, onebot, wake)
+        if report["status"] != "COMPLETE":
+            logger.warning("Scheduled backfill unavailable; successful scan state unchanged")
+            return
+        added = report["added"]
         state.last_scan_time = datetime.now(UTC)
         state.total_runs += 1
         state.save()
