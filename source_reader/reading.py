@@ -62,6 +62,8 @@ def observation(row, item, context, parser_version, clock):
     evidence = row.get("reading") or row.get("article") or row.get("web") or {}
     if discovered:
         coverage = {"level": "DISCOVERED", "scope": "link_and_title"}
+        if item.get("discovery_mode") == "recommend":
+            evidence = {"discovery_mode": "recommend"}
     elif context.source == "bilibili":
         if evidence.get("level") not in {"L1", "L2"}:
             raise ReadFailure("READER_EVIDENCE_REQUIRED")

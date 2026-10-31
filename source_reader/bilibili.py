@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from html.parser import HTMLParser
 from urllib.parse import urlencode, urljoin, urlsplit
 
+from source_reader.bili_signing import signed_query
 from source_reader.network import ReadFailure, video_url
 
 
@@ -139,7 +140,53 @@ class BilibiliReader:
         self.discussion = discussion
         self.parser_version = "bilibili/4"
 
+    async def recommend(self, item, budget):
+        """One signed account feed page; no anonymous or popular fallback."""
+        if (getattr(self.public, "reading_method", None) != "account_api"
+            or not item.get("source_grant")
+            or self.grant_snapshot(required=True) != item["source_grant"]):
+            raise ReadFailure("OWNER_ACCOUNT_AUTHORIZATION_REQUIRED")
+        if budget.max_requests - budget.used_requests < 2:
+            raise ReadFailure("READER_REQUEST_LIMIT")
+        nav = api_data(await self.public.get(
+            "https://api.bilibili.com/x/web-interface/nav", budget, "discovery"))
+        if nav.get("isLogin") is not True:
+            raise ReadFailure("SOURCE_CREDENTIAL_REVOKED")
+        limit = min(20, item["max_items"])
+        query = signed_query({"ps": limit, "fresh_type": 3}, nav,
+                             datetime.fromisoformat(self.clock()))
+        data = api_data(await self.public.get(
+            "https://api.bilibili.com/x/web-interface/wbi/index/top/feed/rcmd?" + query,
+            budget, "discovery"))
+        rows = data.get("item")
+        if not isinstance(rows, list):
+            raise ReadFailure("UPSTREAM_RESPONSE_INVALID")
+        found = {}
+        for row in rows[:40]:
+            if not isinstance(row, dict):
+                raise ReadFailure("UPSTREAM_RESPONSE_INVALID")
+            bvid, title = row.get("bvid"), row.get("title")
+            if (row.get("goto") != "av" or row.get("ad_info") is not None
+                or row.get("is_ad") or not isinstance(bvid, str)
+                or not re.fullmatch(r"BV[0-9A-Za-z]{10}", bvid)
+                or not isinstance(title, str)):
+                continue
+            title = html.unescape(re.sub(r"<[^>]*>", "", title)).strip()[:300]
+            if title:
+                url = video_url("https://www.bilibili.com/video/" + bvid)
+                found.setdefault(url, {"url": url, "title": title, "text": ""})
+            if len(found) == limit:
+                break
+        if not found:
+            raise ReadFailure("DISCOVERY_EMPTY")
+        return list(found.values())
+
     async def read(self, item, budget):
+        if item.get("discovery_mode") is not None:
+            if (item["discovery_mode"] != "recommend" or item["operation"] != "discover"
+                or item.get("query") or item.get("url")):
+                raise ReadFailure("READER_OPERATION_INVALID")
+            return await self.recommend(item, budget)
         if item["operation"] == "discover" and item.get("query"):
             # Core chose the term; one search page, the same shape as the popular list.
             return await search_videos(self.public, item["query"], min(20, item["max_items"]),

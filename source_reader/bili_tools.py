@@ -68,8 +68,12 @@ class BilibiliAccountHTTP(PublicHTTP):
             raise
         self.verify(budget)
         if api_json:
-            code = json.loads(raw).get("code")
-            if code in {-101, -111}:
+            payload = json.loads(raw)
+            code = payload.get("code")
+            if code in {-101, -111} or (
+                parsed.path == "/x/web-interface/nav" and isinstance(payload.get("data"), dict)
+                and payload["data"].get("isLogin") is False
+            ):
                 self.blocked_grant = budget.authorization
                 raise ReadFailure("SOURCE_CREDENTIAL_REVOKED")
             if code in {-352, -412, -403, -10403}:
@@ -176,6 +180,8 @@ class BilibiliToolReader(BilibiliReader):
 
     async def read(self, item, budget):
         if item["operation"] == "discover":
+            if item.get("discovery_mode") is not None:
+                return await super().read(item, budget)
             keyword = item.get("query") or self.keyword  # Core's choice wins over the CLI.
             if not keyword:
                 raise ReadFailure("DISCOVERY_QUERY_REQUIRED")

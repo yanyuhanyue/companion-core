@@ -358,6 +358,7 @@ def test_actual_pre0048_encrypted_snapshot_migrates_before_latest_ledger_replay(
         store.execute("DROP TABLE operator_runtime_snapshots")
         store.execute("DROP TABLE meme_vectors")
         store.execute("DROP TABLE watch_ledger")  # Added after 0047 too.
+        store.execute("ALTER TABLE exploration_requests DROP COLUMN discovery_mode")
         store.execute("ALTER TABLE exploration_requests DROP COLUMN query")
         store.execute("DROP TABLE style_candidates")
         store.execute("DROP TABLE style_pairs")
@@ -376,7 +377,7 @@ def test_actual_pre0048_encrypted_snapshot_migrates_before_latest_ledger_replay(
     with closing(Store(str(restored))) as store:
         assert (
             store.one("SELECT version_num FROM alembic_version")["version_num"]
-            == "0057_expression_configuration"
+            == "0058_bili_discovery"
         )
         assert not store.rows("SELECT * FROM meme_vectors")
         assert store.one("SELECT state FROM meme_assets")["state"] == "ERASED"

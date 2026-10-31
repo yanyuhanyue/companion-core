@@ -89,3 +89,63 @@ python -m pytest -q tests/test_bili_style_evaluation.py tests/test_bili_style_ob
 1. 真实的已批准候选：02 当前为 `NOT_RUN`，需要采样授权（B3）和提炼授权。
 2. OwnerAuthority 加入 `evaluation` purpose（B7）。
 3. 主人或评审人完成盲评。进入 Beta 的门槛按 00 §5 原样执行。
+
+## 2026-10-31：近期表达重复评估
+
+本轮主人选定离线／影子评估范围。`style_distill` 继续负责从已读评论提炼抽象交流经验；
+本节评估自己的近期表达，不训练、保存或注入新的风格候选。
+上游固定来源与推荐流接入见 [插件兼容性增量](../../design-v0.6/plugin-compat-p3.md#2026-10-31账号推荐流发现)。
+
+### 人工判读
+
+| 维度 | 需要判断的内容 | 必须保留的自然表达 |
+|---|---|---|
+| `opening_repetition` | 连续多轮是否习惯性套用相同开场或句式 | 稳定口吻、简短应答、语境合适的相同说法 |
+| `meme_reuse` | 同一个梗是否被反复硬套到无关话题 | 主人邀请接梗、自然回扣、共同话题 |
+| `story_repetition` | 是否缺少新信息却把已分享的事重新介绍 | 主人要求复述、相关回顾、纠正与有新增的进展 |
+
+每项由人工填写 `NATURAL`、`REPETITIVE` 或 `UNSCORABLE`，并写具体理由。
+自然度和语境贴合比字面变化更重要；不要求每轮换口吻。
+同一故事改换措辞仍可能重复，重复一句话也可能恰好合适。
+
+### 可运行入口
+
+`scripts/evaluate_expression_repetition.py` 只读调用方提供的文字，不查询生产数据库、
+调用模型或修改回复。输入为 JSON 对象：
+
+```json
+{
+  "messages": [
+    {"role": "user", "content": "刚才看到什么？"},
+    {"role": "assistant", "content": "读到了恒星颜色与温度的关系。"},
+    {"role": "user", "content": "再讲一遍那个故事吧"}
+  ],
+  "reply": "读到了恒星颜色与温度的关系。",
+  "meme_phrases": [],
+  "scorable": true
+}
+```
+
+```text
+python scripts/evaluate_expression_repetition.py --input .local/expression-input.json --output .local/expression-review.json
+```
+
+最多保留最近 12 条 assistant 回复及对应的主人输入。报告提供共同开头字符数、bigram
+Jaccard 重合、最长共同片段，以及调用方明确指定的梗原文是否重用；最长片段只比较标准化
+文本的前 2000 字。原上下文保留供人工核对；这些数值不自动判断同梗、故事新旧或表达好坏。
+没有指定梗原文时仍保留人工 `meme_reuse` 判读。
+失败、空白或不完整的输出应传 `scorable=false`，不能计作多样性改善。
+报告只标记 `supplied_text_only`；真实样本应由已有送达回执确认可见文字，草稿不能冒充已说过。
+生成的报告限定在工作区 `.local`，已有文件不会被覆盖；含私人原文的报告按原样本处理许可保管与删除。
+
+现有 `scripts/evaluate_r1_conversation.py blind` 新增 `--expression-review`，
+在原有 A/B 选票之外生成 `expression-review.json`。该文件沿用原 `pair_id`、盲化 A/B 与
+共享输入，不包含策略名称；原计划、付费计量和六维选票不变。
+原评测判为不可评分的输出，这份附加表也标为不可评分。
+
+### 本轮验证与结论边界
+
+合成回归覆盖固定开头、同梗硬套、旧事重讲、主人要求复述、自然接梗和改写后的旧事。
+后几类保留原语境和人工空白评分，避免把“字面重合”误当成“需要拦截”。
+这证明评估工具和盲评接线可用，不证明真实对话质量已经提高。
+真实样本的人工判断仍待完成；本轮不新增付费生成。

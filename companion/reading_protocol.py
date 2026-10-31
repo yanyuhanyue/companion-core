@@ -109,6 +109,10 @@ class WebEvidence(StrictModel):
 class DiscoveryEvidence(StrictModel):
     """Link/title discovery has no fetched-body evidence."""
 
+    discovery_mode: Literal["recommend"] | None = Field(
+        default=None, exclude_if=lambda value: value is None,
+    )
+
 
 class ObservationEvidence(StrictModel):
     original_url: str = Field(min_length=1, max_length=2048)

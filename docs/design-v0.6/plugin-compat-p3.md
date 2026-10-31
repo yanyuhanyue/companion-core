@@ -101,3 +101,69 @@ Compose 的 `heybox-native`、`bilibili-tools` profile 默认关闭，账号文�
 回滚：停止新增 Reader，撤销其 Core 观察 token 或关闭观察/探索开关，将本地 grant 的
 `enabled` 设为 false。保留原聊天 worker、Outbox、UNKNOWN 预留和独立 ErasureLedger。
 不清数据库、不降级 0014、不修改既有 PR 历史。换上游版本前重做许可、工具目录、端点和实测审查。
+
+## 2026-10-31：账号推荐流发现
+
+主人选定的本轮范围是账号推荐流与离线／影子表达评估。
+推荐流仍经过独立 Reader 的 Reading v1 HTTP 边界；表达评估的入口与人工尺度见
+[CC-STYLE-04 增量](../experiments/bili-style/04-evaluation.md#2026-10-31近期表达重复评估)。
+
+### 上游增量与复用
+
+本次只读检查 `dsh-bili-scroll` 提交 `2c7b3f14f525360f8657b102ec453fd8f02baf3a`，
+该树的 `package.json` 为 2.3.1。这里记录的是新的参考基线，前文 P3 验收记录仍对应原固定树。
+
+| 来源 | 核实内容与 Core 采用范围 |
+|---|---|
+| [上游 MCP 源码](https://github.com/c1overzz/dsh-bili-scroll/blob/2c7b3f14f525360f8657b102ec453fd8f02baf3a/vendor/bilibili-mcp/mcp_server.py) | `bili_recommend` 调用 `homepage.get_videos`，筛选普通视频；Core 参考发现来源和卡片形状 |
+| [上游值班说明](https://github.com/c1overzz/dsh-bili-scroll/blob/2c7b3f14f525360f8657b102ec453fd8f02baf3a/prompts/duty.md) | 推荐发现、近期表达参考与有限故事板读取；本轮实现前两项，故事板属于已有独立视频能力的范围 |
+| [SDK 17.4.2 发行包](https://pypi.org/project/bilibili-api-python/17.4.2/) | 复核 P3 隔离环境已锁定的发行包中 `bilibili_api/homepage.py` 与 `data/api/homepage.json`：推荐端点是 `/x/web-interface/wbi/index/top/feed/rcmd`，使用 WBI 签名 |
+
+推荐流实现使用现有 HTTP 客户端和有界请求预算。WBI 签名从 `bili_media.py`
+抽到无 Core 依赖的 `source_reader/bili_signing.py`，两个调用方共用；其已有参考来源见
+该模块注释。没有添加或分发上游 SDK；正式依赖与锁文件不变。
+
+### 配置与行为
+
+在现有 B站适配器配置中明确选择推荐流，继续使用原有 token：
+
+```toml
+[observation_adapters.bili]
+source = "bilibili"
+# token 沿用本适配器已有值
+source_grant_required = true
+reader_max_requests = 2
+bilibili_discovery = "recommend"
+```
+
+独立进程启动方式：
+
+```text
+python -m source_reader --source bilibili --protocol reading-v1 --account-file <private-grant.json> --core-url <private-origin> --adapter-id bili
+```
+
+`--bili-tools` 模式也接受 Core 明确下发的推荐流选择。来源授权文件、Core 中注册的读取授权、
+观察／探索开关、OwnerAuthority 和探索额度仍分别生效。登录状态和 WBI 参数一次 GET，
+推荐列表一次 GET，共用同一租约、字节和请求预算，最多返回 20 条普通视频；过滤直播、
+番剧、广告、无效 BV 与重复链接。无可用视频返回 `DISCOVERY_EMPTY`，不生成阅读经历。
+
+`bilibili_discovery` 默认 `popular`；默认值不增加既有配置序列化字段。
+已有兴趣选择的搜索请求继续携带 `query`；无搜索词的发现才使用配置选定的推荐流。
+因此现有兴趣搜索与探索分配可以继续工作，推荐画像本身不被当成兴趣多样性的保证。
+
+迁移 `0058_bili_discovery` 在请求中冻结 `discovery_mode`；历史请求保持 `default`。
+新配置不把排队中的热门发现升级成账号推荐。推荐请求只交给 Reading v1 Worker；
+关闭推荐配置会使尚未执行的推荐请求取消，在途请求在下一次验证时停止。
+每次外部 I/O 继续验证原租约与原授权；账号失效后本次发现结束。
+
+返回结果只有标题和链接，使用 `DISCOVERED/link_and_title`，证据记录
+`discovery_mode=recommend`，来源归属保留实际 `source_grant`。Core 将该标记与原请求核对。
+随后阅读字幕、形成兴趣或分享仍由既有流程决定；发现列表不证明看过视频。
+
+### 验证范围
+
+`tests/test_bili_recommend.py` 覆盖账号失败、协议拒绝、卡片筛选、搜索并存、冻结来源，
+以及真实 Core HTTP 与独立 Reader CLI 的两种运行模式；外部 B站响应为合成输入。
+独立进程不导入 Core 存储依赖，完成后再次领取不会重读或产生消息。
+现有视频、Reader 授权／擦除、探索、迁移与风格评测作为相关回归检查。
+真实账号推荐质量尚未验收。

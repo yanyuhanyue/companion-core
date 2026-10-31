@@ -274,6 +274,10 @@ class ReadingService:
             if (observation.result_status == "DISCOVERED") != discovered:
                 raise CoreError("READING_OPERATION_MISMATCH", 400)
             evidence = observation.evidence
+            if discovered and getattr(evidence, "discovery_mode", None) != (
+                "recommend" if row["discovery_mode"] == "recommend" else None
+            ):
+                raise CoreError("READING_DISCOVERY_MISMATCH", 400)
             evidence_bytes = (sum(item.bytes for item in evidence.sources)
                               if isinstance(evidence, ReadingEvidence)
                               else getattr(evidence, "response_bytes", 0))
