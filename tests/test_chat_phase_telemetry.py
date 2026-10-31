@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import sys
 
 import httpx
 import pytest
@@ -48,12 +49,18 @@ def test_native_request_wire_and_ledger_are_unchanged(core, tmp_path, monkeypatc
     snapshots = []
     messages = core.context(job, snapshots=snapshots, planning=True)
     persistence = ConversationStore(core, job, snapshots)
-    rows, requests = [], []
+    rows, requests, lock_rows = [], [], []
     network = {"inside": False, "returned": False}
     monkeypatch.setenv("COMPANION_TELEMETRY", "1" if enabled else "0")
     monkeypatch.setenv("COMPANION_TELEMETRY_EVIDENCE", "OFFLINE_FIXTURE")
+    # Slow-lock diagnostics are a separate stderr stream, even under CI contention.
+    if enabled is True:
+        monkeypatch.setattr(telemetry, "LOCK_REPORT_MS", 0)
 
     def sink(line, **kwargs):
+        if kwargs.get("file") is sys.stderr:
+            lock_rows.append(json.loads(line))
+            return
         assert not network["inside"]
         if enabled == "broken_sink":
             raise ValueError("closed diagnostic stream")
@@ -88,6 +95,7 @@ def test_native_request_wire_and_ledger_are_unchanged(core, tmp_path, monkeypatc
     assert not core.store.rows("SELECT * FROM outbox")
     assert persistence.row()["phase"] == "OUTPUT"
     if enabled is True:
+        assert lock_rows and all(row["stage"] == "db_write_lock" for row in lock_rows)
         assert all(set(row) <= FIELDS and row["trace_id"] == job["trace_id"] for row in rows)
         assert "PRIVATE_REPLY_CANARY" not in json.dumps(rows)
         assert core.settings.model_key.get_secret_value() not in json.dumps(rows)
