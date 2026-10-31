@@ -64,7 +64,8 @@ LABELS = {
     "chat_time_labels": "对话里标注时间",
     "input_debounce": "连发消息合并回复", "conversation_policy": "对话策略",
     "quote_policy": "回复时引用原消息", "style_live": "聊天时参考已批准的表达",
-    "style_distill": "从评论提炼表达候选", "watch_ledger": "观看记录与看法",
+    "style_distill": "从评论提炼表达候选",
+    "jargon": "学习主人的黑话", "watch_ledger": "观看记录与看法",
     "rem": "夜间 REM 记录", "life_loop": "生活话题循环",
     "evaluation_enabled": "对话评测实验", "owner_runtime": "主人授权运行模式",
     "token_measurement": "Token 精确计数",
@@ -266,7 +267,7 @@ GROUPS = {"chat_thinking": "model", "chat_thinking_tokens": "model",
           "token_measurement": "model", "chat_time_labels": "expression",
           "conversation_policy": "expression",
           "input_debounce": "expression", "quote_policy": "expression",
-          "style_live": "expression", "style_distill": "expression",
+          "style_live": "expression", "style_distill": "expression", "jargon": "memory",
           "watch_ledger": "content", "rem": "autonomy", "life_loop": "autonomy"}
 
 

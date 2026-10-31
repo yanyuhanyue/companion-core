@@ -52,6 +52,7 @@ def cleanup_contracts():
     from companion.executive import erase_executive
     from companion.exploration import erase_exploration
     from companion.goals import erase_goals
+    from companion.jargon import erase as erase_jargon
     from companion.life_topics import erase_topics
     from companion.media import erase_media_links
     from companion.meme_assets import erase as erase_meme_assets
@@ -102,6 +103,7 @@ def cleanup_contracts():
         event_cleanup("bili-video", erase_bili_video),
         event_cleanup("watch-ledger", erase_watch_ledger),
         event_cleanup("style-distill", erase_style_distill),
+        event_cleanup("jargon", erase_jargon),
         event_cleanup("evaluation", erase_evaluation),
     )
 

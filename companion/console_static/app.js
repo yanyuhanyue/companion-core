@@ -256,7 +256,7 @@ const api = {
 
 function errorText(error) {
   const messages = {
-    MEMORY_DISABLED: "长期记忆没有开启。", STYLE_CANDIDATE_NOT_FOUND: "这条表达候选已经处理过或已过期。", STYLE_CANDIDATE_RISK_REJECT_ONLY: "这条候选带风险标记或来源理解不一致，只能拒绝。",
+    MEMORY_DISABLED: "长期记忆没有开启。", JARGON_TERM_NOT_FOUND: "这个说法已经不在了。", STYLE_CANDIDATE_NOT_FOUND: "这条表达候选已经处理过或已过期。", STYLE_CANDIDATE_RISK_REJECT_ONLY: "这条候选带风险标记或来源理解不一致，只能拒绝。",
     CONSOLE_NETWORK_ERROR: "连接中断了，请检查网络后重试。", CONSOLE_TIMEOUT: "服务器响应超时，请稍后重试。",
     CONSOLE_RESPONSE_INVALID: "服务器返回的数据不完整，请刷新核对。", CONSOLE_HTTPS_REQUIRED: "请通过 HTTPS 打开控制台后再操作。",
     CONSOLE_LOGIN_RATE_LIMIT: "密码错误次数过多，请 5 分钟后再试。", PROACTIVE_DISABLED_IN_CONFIG: "主动私聊在配置里是关闭的，先在配置里开启。",
@@ -469,7 +469,7 @@ const LOADERS = {
     }
     return { ...page, items };
   },
-  memories: signal => state.memTab === "recall"
+  memories: signal => state.memTab === "jargon" ? api.get("/jargon", signal) : state.memTab === "recall"
     ? (state.memQ.trim() ? api.get("/memories/recall?q=" + encodeURIComponent(state.memQ.trim()), signal) : Promise.resolve({ items: [], query: "" }))
     : api.get("/memories?limit=60&review=" + (state.memTab === "review") + (state.memQ.trim() ? "&q=" + encodeURIComponent(state.memQ.trim()) : ""), signal),
   life: async signal => {
@@ -810,6 +810,30 @@ PAGES.activity = data => {
 const MEM_KIND = { preference: "偏好", fact: "事实", plan: "计划", habit: "习惯", relation: "关系", profile: "资料", event: "事件", communication: "沟通", goal: "目标" };
 const MEM_SUBJECT = { user: "关于你", owner: "关于你", self: "关于她", companion: "关于她" };
 function memSearch(v) { state.memQ = v; clearTimeout(state.searchTimer); state.searchTimer = setTimeout(() => loadRoute({ reset: true }), 300); }
+const JARGON_STATE = { CANDIDATE: ["还在观察", "run"], INFERRED: ["已推测含义", "ok"], NOT_JARGON: ["是普通说法", "off"] };
+function jargonView(data) {
+  const items = data.items || [];
+  return el("div", {}, data.enabled ? null : el("p", { class: "note mb" }, "黑话学习没有开启（配置页“学习主人的黑话”）。"),
+    el("p", { class: "note mb" }, "从你的私聊里学到的说法。含义是她根据你以前的用法猜的，只用来理解你，不会拿来模仿。来源消息被遗忘时会一起删除。"),
+    items.length ? el("ul", { class: "rows" }, items.map(t => { const [label, tone] = JARGON_STATE[t.state] || [t.state, "off"];
+      return el("li", { class: "block" },
+        el("div", { class: "row-gap" }, el("b", {}, t.term), el("span", { class: "tag " + tone }, label),
+          el("span", { class: "note" }, "用过 " + count(t.uses) + " 次，" + fmtDate(t.updated_at) + " 更新")),
+        t.meaning ? el("p", { class: "mt" }, "可能指：" + t.meaning) : null,
+        el("div", { class: "row-gap mt" }, btn("忘掉这个说法", () => jargonForget(t), { cls: "sm danger", symbol: "trash" })));
+    })) : empty("还没有学到黑话", "你在私聊里用到自己特有的说法后，会先出现在这里观察，用到几次后再推测含义。"));
+}
+function jargonForget(t) {
+  const form = el("form", { class: "dlg-form" }, el("p", {}, "“" + t.term + "”以后不再学习，也不再用来理解你的消息。聊天记录不受影响。"));
+  const submit = el("button", { type: "submit", class: "btn danger" }, "忘掉");
+  form.append(el("div", { class: "dlg-acts" }, submit));
+  form.addEventListener("submit", e => {
+    e.preventDefault();
+    perform(form, submit, () => api.write("/jargon/forget", { term: t.term }, "POST", r => typeof r.state === "string"),
+      async () => { closeDialog(); toast("已忘掉"); await loadRoute({ reset: true }); });
+  });
+  openDialog("忘掉“" + t.term + "”？", form);
+}
 function recallView(data) {
   const items = data.items || [];
   if (!state.memQ.trim()) return empty("输入一句话试试", "按聊天时的同一套检索排序，显示她会想起哪些记忆、为什么。不调用模型。");
@@ -831,12 +855,12 @@ PAGES.memories = data => {
     oninput: e => { if (e.isComposing) return; memSearch(e.target.value); }, oncompositionend: e => memSearch(e.target.value) });
   return el("div", {}, head("记忆", "每条记忆都有原话作为来源。确认后她会在以后的对话里用到；忘记会同时清除来源和由此衍生的内容。"),
     el("div", { class: "toolbar" }, el("div", { class: "seg", role: "group" },
-      [["review", "待确认"], ["all", "全部"], ["recall", "召回测试"]].map(([k, n]) => el("button", { type: "button", "aria-pressed": String(state.memTab === k), onclick: () => { state.memTab = k; loadRoute({ reset: true }); } },
+      [["review", "待确认"], ["all", "全部"], ["recall", "召回测试"], ["jargon", "黑话"]].map(([k, n]) => el("button", { type: "button", "aria-pressed": String(state.memTab === k), onclick: () => { state.memTab = k; loadRoute({ reset: true }); } },
         n, k === "review" && state.nav?.review ? el("span", { class: "count" }, String(state.nav.review)) : null))),
       el("label", { class: "search" }, icon("search"), searchInput), el("span", { class: "spacer" }),
       el("div", { class: "seg", role: "group", "aria-label": "视图" }, [["list", "列表", "timeline"], ["graph", "关系图", "spark"]].map(([k, n, ic]) =>
         el("button", { type: "button", "aria-pressed": String(state.memView === k), onclick: () => { state.memView = k; rerender(); } }, icon(ic), n)))),
-    state.memTab === "recall" ? recallView(data) : state.memView === "graph" ? memoryGraph(items) : items.length ? el("div", { class: "mem-list" }, items.map(m => {
+    state.memTab === "jargon" ? jargonView(data) : state.memTab === "recall" ? recallView(data) : state.memView === "graph" ? memoryGraph(items) : items.length ? el("div", { class: "mem-list" }, items.map(m => {
       const d = m.detail || {}, review = m.status !== "CONFIRMED" || d.needs_review;
       return el("article", { class: "mem" + (review ? " review" : "") },
         el("div", {}, el("h3", {}, m.title), el("div", { class: "meta" }, tag(m.status), d.memory_kind ? el("span", { class: "chip" }, MEM_KIND[d.memory_kind] || "其他") : null,

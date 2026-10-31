@@ -225,6 +225,7 @@ def admit_model(store, settings, clock, job_id, scenario):
         settings.social_autonomy.enabled if scenario == "social_autonomy" else
         settings.watch_ledger.enabled if scenario == "watch_review" else
         settings.style_distill.enabled if scenario == "style_distill" else
+        settings.jargon.enabled if scenario == "jargon" else
         feature is not None and getattr(settings, feature + "_enabled")
     )
     if not allowed_feature and not life_shadow:
@@ -247,7 +248,7 @@ def admit_model(store, settings, clock, job_id, scenario):
         if scenario not in allowed.get(job["kind"], set()):
             raise CoreError("COMPANION_MODEL_SCOPE_REQUIRED", 403)
     elif scenario not in {"memory_extract", "memory_review", "diary", "reflection",
-                          "social_autonomy", "watch_review", "style_distill"}:
+                          "social_autonomy", "watch_review", "style_distill", "jargon"}:
         raise CoreError("COMPANION_BACKGROUND_SCOPE_REQUIRED", 403)
 
 

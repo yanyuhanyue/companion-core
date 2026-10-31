@@ -75,6 +75,7 @@ REVISION_CHAIN = (
     "0050_watch_ledger",
     "0051_exploration_query",
     "0052_style_distill",
+    "0053_owner_jargon",
 )
 LEGACY_TABLES = (
     "principals",

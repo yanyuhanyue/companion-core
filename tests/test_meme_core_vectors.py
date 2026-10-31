@@ -359,6 +359,8 @@ def test_actual_pre0048_encrypted_snapshot_migrates_before_latest_ledger_replay(
         store.execute("ALTER TABLE exploration_requests DROP COLUMN query")
         store.execute("DROP TABLE style_candidates")
         store.execute("DROP TABLE style_pairs")
+        store.execute("DROP TABLE jargon_work")
+        store.execute("DROP TABLE jargon_terms")
         store.execute("UPDATE alembic_version SET version_num='0047_meme_assets'")
     archive, restored, key = (
         tmp_path / "pre0048.enc",
@@ -372,7 +374,7 @@ def test_actual_pre0048_encrypted_snapshot_migrates_before_latest_ledger_replay(
     with closing(Store(str(restored))) as store:
         assert (
             store.one("SELECT version_num FROM alembic_version")["version_num"]
-            == "0052_style_distill"
+            == "0053_owner_jargon"
         )
         assert not store.rows("SELECT * FROM meme_vectors")
         assert store.one("SELECT state FROM meme_assets")["state"] == "ERASED"

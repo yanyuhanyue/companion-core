@@ -919,6 +919,20 @@ class Core(Runtime):
                     | {item["event_id"] for trait in trait_rows for item in trait["evidence"]}))
                 reference_proofs.append((memory_reference,
                                          {"kind": "memory", "proof": memory_proof}))
+        # A bounded window admits only its approved facts, never learned jargon.
+        if (job["kind"] == "chat" and cfg.jargon.enabled and permitted("memory")
+                and not bounded_text):
+            from companion import jargon
+
+            terms, term_sources = jargon.context(s, text, cfg.jargon.max_context_terms)
+            if terms:
+                references.append({
+                    "role": "user",
+                    "content": "主人用语参考（根据主人以前的用法推测，不一定准确；只用来理解"
+                    "主人的意思，不要模仿、不要解释给主人听，不确定就按字面理解）：\n"
+                    + encode(terms),
+                })
+                reference_sources.append((references[-1], term_sources))
         mark("context_memory")
         if authority:
             sources = owner_input.history_sources(s, cfg, self.clock, job) if (
