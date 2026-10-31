@@ -27,6 +27,7 @@ def test_guidance_uses_only_current_source_closure_and_has_no_write_or_clock(cor
     complete_read(core, 2, "https://example.org/unrelated")
     core.store.execute("UPDATE goals SET topic='其他私人兴趣' WHERE goal_id IN "
                        "(SELECT goal_id FROM goal_evidence WHERE event_id='evt_test_2')")
+    revision = core.store.one("SELECT version_num FROM alembic_version")["version_num"]
     before = core.store.db.total_changes
     for ids in (["evt_test_1"], ["obs_test_1"], ["evt_test_1", "obs_test_2"]):
         view = context(core, ids)
@@ -40,9 +41,7 @@ def test_guidance_uses_only_current_source_closure_and_has_no_write_or_clock(cor
     core.clock.advance(60)
     assert context(core, ["evt_test_1", "obs_test_1"]) == view
     assert core.store.db.total_changes == before
-    assert core.store.one("SELECT version_num FROM alembic_version")["version_num"] == (
-        "0058_bili_discovery"
-    )
+    assert core.store.one("SELECT version_num FROM alembic_version")["version_num"] == revision
     assert core.store.rows("PRAGMA foreign_key_check") == []
 
 
