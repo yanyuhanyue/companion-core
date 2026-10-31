@@ -127,3 +127,15 @@ def test_v2_wording_avoids_cold_positioning_and_requires_sources():
     assert "不要用“AI 朋友”“陪你聊天”这类定位语" in PARTICIPATION_V2
     assert "没有就不要装作记得" in PARTICIPATION_V2
     assert "小肥鱼" not in PARTICIPATION_V2  # Names come from memory, never the prompt.
+
+
+@pytest.mark.parametrize("text", ["嗯嗯", "哈哈", "晚安"])
+@pytest.mark.parametrize("tone", [None, "detailed"])
+def test_v2_surface_cues_do_not_override_context_or_explicit_length_feedback(text, tone):
+    affect = {"state": {**NEUTRAL, "interaction_tone": tone}, "evidence": []}
+    _, _, decision = prompt_parts("原有规则", ConversationPolicyConfig(),
+                                   current_text=text, affect=affect)
+    assert decision.length_hint == (tone or "contextual")
+    revalidate(decision.receipt(), ConversationPolicyConfig(), current_text=text, affect=affect)
+    # The frozen strategy retains its original surface-only hint.
+    assert prompt_parts("原有规则", v1_policy(), current_text=text)[2].length_hint == "brief"

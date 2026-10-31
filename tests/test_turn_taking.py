@@ -83,13 +83,15 @@ def test_a_short_closing_after_a_delivered_reply_may_go_unanswered(core):
     assert json.loads(audit["safe_detail_json"])["reply_skipped"] is True
 
 
-@pytest.mark.parametrize("text", ["那你呢？", "你觉得行吗", "我跟你说个事情吧好不好"])
-def test_questions_and_longer_messages_are_always_answered(core, text):
+@pytest.mark.parametrize("text", ["那你呢？", "你觉得行吗", "我跟你说个事情吧好不好",
+                                 "怎么弄", "帮我看看", "2+2", "我好难过", "还有个事"])
+def test_questions_requests_and_new_content_are_always_answered(core, text):
     enable(core)
     turn(core, 1, "今天把报告交了", "辛苦啦。")
     core.clock.advance(20)
     turn(core, 2, text)
     assert SILENCE_RULES not in system(core)
+    assert len(outbox(core)) == 2
 
 
 def test_an_answer_to_the_bots_question_is_not_a_closing(core):
