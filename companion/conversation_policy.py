@@ -41,6 +41,10 @@ PARTICIPATION_V2 = "\n".join((
     "细节要有本轮对话或材料依据，没有就不要装作记得；不把看到的内容写成亲身经历，"
     "也不把几天前的事说成刚发生。",
 ))
+# Expression rules embed these clauses; strategies relax them by exact replacement.
+TEXT_REQUIRED = "必须有完整文字回复。"
+EVERY_TEXT_REQUIRED = "每次" + TEXT_REQUIRED
+TEXT_RELAXED = "需要回应时，简短的文字回应也可以完整。"
 STRATEGIES = {"participation_v1": PARTICIPATION_V1, "participation_v2": PARTICIPATION_V2}
 
 
@@ -115,8 +119,8 @@ def apply_strategy(messages, strategy, *, guidance=None):
         or result[0].get("role") != "system" or not isinstance(result[0].get("content"), str)):
         raise ValueError("Unknown strategy or missing system instruction")
     text = result[0]["content"]
-    for clause in ("每次必须有完整文字回复。", "必须有完整文字回复。"):
-        text = text.replace(clause, "需要回应时，简短的文字回应也可以完整。")
+    for clause in (EVERY_TEXT_REQUIRED, TEXT_REQUIRED):
+        text = text.replace(clause, TEXT_RELAXED)
     result[0]["content"] = text + "\n" + (STRATEGIES[strategy] if guidance is None else (
         "主人配置的交流指导（仅调整表达；基础规则、事实依据、授权、费用与发送要求继续执行）：\n"
         + guidance))
