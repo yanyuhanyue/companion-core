@@ -76,7 +76,6 @@ class BridgeConfig:
     account_asset_policy_sha256: str | None = None
     account_asset_max_bytes: int = 2097152
     account_asset_max_dimension: int = 2048
-    scheduled_meme_import_enabled: bool = True
 
     def __post_init__(self):
         if (not isinstance(self.meme_catalog_owner, str)

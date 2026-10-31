@@ -75,8 +75,7 @@ def decision_context(store, settings, sources, authority_sha256, now):
                 "requires_reconciliation": unknown,
                 "source_event_ids": sorted(roots),
             })
-        # Phase 1: Interest from any completed goal, not just result_event_id in sources.
-        if (goal["state"] != "DONE" or not goal["result_event_id"]
+        if (goal["state"] != "DONE" or goal["result_event_id"] not in ids
             or not settings.memory_enabled or not permitted(store, settings, now, "memory")):
             continue
         topic = goal["topic"][:80]

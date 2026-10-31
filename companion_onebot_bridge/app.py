@@ -286,7 +286,6 @@ async def run(config):
             from .owner_memes import MemePump
             from .pending_media import MediaPump
             from .profile_probe import ProfilePump
-            from .scheduled_import import schedule_import_job, run_scheduler_loop
 
             media = MediaPump(runtime, core, protocol=onebot, metrics=metrics)
             profile = ProfilePump(runtime, core, protocol)
@@ -294,17 +293,6 @@ async def run(config):
             status = await runtime.probe(core, protocol)
             if not status["connection_ready"]:
                 raise ValueError("ONEBOT_NOT_READY")
-
-            # Register scheduled import job
-            schedule_import_job(
-                runtime=runtime,
-                core=core,
-                onebot=onebot,
-                wake=wake,
-                enabled=config.scheduled_meme_import_enabled,
-                loop=asyncio.get_running_loop(),
-            )
-
             async with asyncio.TaskGroup() as group:
                 tasks = [
                     group.create_task(receive(config, spool, wake, stop, metrics, onebot,
@@ -316,7 +304,6 @@ async def run(config):
                     group.create_task(transfer_media(media, stop)),
                     group.create_task(observe_profile(profile, stop)),
                     group.create_task(discover_memes(memes, stop, profile)),
-                    group.create_task(run_scheduler_loop(stop)),
                 ]
                 await stop.wait()
                 await drain(tasks)
