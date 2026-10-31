@@ -7,7 +7,9 @@ from the target Core image against that copy with no network, deletes the copy, 
 writes `plan.json` and `plan.md` that say what the release needs:
 
 - NO_CHANGE: nothing to deploy.
-- EDGE: only Bridge, Reader or UI images change; restart those services when idle.
+- EDGE: only Bridge, Reader or UI images change; replace those services one at a time
+  (`scripts/edge_release.py`). A Bridge change also needs its custody ACTIVE with no
+  unsettled send, and the same `companion_delivery_protocol` as the running Core.
 - A: Core code changes, no migration, the stored OwnerAuthority policy stays valid.
 - R: with `--rolling`, an A release done without STOP by restarting one worker role at a
   time (`scripts/rolling_worker_release.py`); API, Bridge and Readers keep running.
@@ -19,6 +21,7 @@ Standard library only, so it runs with the host's Python.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -30,6 +33,8 @@ from pathlib import Path
 
 GROUPS = {"core": "companion-api", "bridge": "bridge", "reader": "bilibili-reader",
           "ui": "console-ui"}
+CORE_WORKERS = ("companion-content-worker", "companion-executive-worker",
+                "companion-life-worker", "companion-worker")
 MIGRATION_BLOCKERS = {"MIGRATION_REQUIRED"}
 SQLITE_HEADER = b"SQLite format 3\x00"
 SKIP_SUFFIXES = ("-wal", "-shm", "-journal")
@@ -74,6 +79,79 @@ def services(inspected):
     return result
 
 
+REVISION_LABELS = ("com.companion.revision", "org.opencontainers.image.revision")
+PROTOCOL_DIGEST = (
+    "import hashlib,pathlib,companion_delivery_protocol as p\n"
+    "root=pathlib.Path(p.__file__).parent\n"
+    "h=hashlib.sha256()\n"
+    "for f in sorted(root.rglob('*.py')):\n"
+    "    h.update(f.relative_to(root).as_posix().encode()+b'\\0'+f.read_bytes()+b'\\0')\n"
+    "print(h.hexdigest())\n")
+
+
+def versions(inspected):
+    """service -> code revision labels and the hashes of its read-only config files."""
+    result = {}
+    for item in inspected:
+        labels = item["Config"].get("Labels") or {}
+        service = labels.get("com.docker.compose.service")
+        if not service:
+            continue
+        configs = {}
+        for mount in item.get("Mounts", []):
+            source = Path(mount.get("Source") or "")
+            if mount["Type"] == "bind" and not mount.get("RW") and source.is_file():
+                configs[mount["Destination"]] = hashlib.sha256(source.read_bytes()).hexdigest()
+        result[service] = {"image": item["Image"],
+                           "revision": {key: labels[key] for key in REVISION_LABELS
+                                        if key in labels},
+                           "configs": configs}
+    return result
+
+
+def protocol_digest(image, python):
+    """Digest of the shared Bridge/Core contract package inside an image, without network."""
+    result = docker("run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL",
+                    "--entrypoint", python, image, "-c", PROTOCOL_DIGEST, check=False)
+    lines = result.stdout.split() if not result.returncode else []
+    return lines[-1] if lines and len(lines[-1]) == 64 else None
+
+
+def bridge_custody(bridge):
+    """Read-only view of the running Bridge Spool: authority state and unsettled work."""
+    for mount in bridge["mounts"]:
+        database = Path(mount["source"] or "", "spool.sqlite3")
+        if mount["type"] != "bind" or not mount["rw"] or not database.is_file():
+            continue
+        db = sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True, timeout=30)
+        try:
+            def table(name, db=db):
+                return db.execute("SELECT 1 FROM sqlite_master WHERE name=?",
+                                  (name,)).fetchone() is not None
+
+            row = (db.execute("SELECT state FROM owner_runtime WHERE id=1").fetchone()
+                   if table("owner_runtime") else None)
+            sends = (dict(db.execute(
+                "SELECT state,COUNT(*) FROM window_attempts WHERE state IN "
+                "('RESERVED','IO_STARTED','UNKNOWN') GROUP BY state"))
+                if table("window_attempts") else {})
+            held = (db.execute("SELECT COUNT(*) FROM held_inputs WHERE state='HELD'"
+                               ).fetchone()[0] if table("held_inputs") else 0)
+            pending = db.execute("SELECT COUNT(*) FROM inbox WHERE state='pending'"
+                                 ).fetchone()[0]
+        finally:
+            db.close()
+        stopped = any(database.parent.glob("owner-*.stop"))
+        return {"state": row[0] if row else "ABSENT", "stop_requested": stopped,
+                "unsettled_sends": sends, "held_inputs": held, "pending_inputs": pending}
+    return {"state": "UNREADABLE"}
+
+
+def image_id(reference):
+    """Containers report image IDs; a tag must resolve to the loaded image it names."""
+    return docker("image", "inspect", "--format", "{{.Id}}", reference).stdout.strip()
+
+
 def changes(current, targets):
     """Which services each target image would replace; unknown groups are an error."""
     result = {}
@@ -82,7 +160,10 @@ def changes(current, targets):
         if anchor not in current:
             raise ValueError(f"Unknown or absent component {group}")
         old = current[anchor]["image"]
-        replaced = sorted(name for name, svc in current.items() if svc["image"] == old)
+        # After a rolling release the workers run a newer image than the API; they still
+        # belong to the Core group.
+        replaced = sorted(name for name, svc in current.items() if svc["image"] == old
+                          or group == "core" and name in CORE_WORKERS)
         if image != old:
             result[group] = {"from": old, "to": image, "services": replaced}
     return result
@@ -200,10 +281,15 @@ STEPS = {
         "观察日志和 worker 心跳",
     ],
     "EDGE": [
-        "确认没有正在发送的消息、正在进行的读取后，只重启下列服务",
-        "观察健康检查和日志",
+        "不执行 STOP；Core API 和 worker 都不动",
+        "用 scripts/edge_release.py 按 UI、Reader、Bridge 的顺序逐个替换下列服务",
+        "每个服务先平滑停止（退出码 0；Bridge 还要释放 instance.lock、没有未结发送），"
+        "再用新镜像启动，确认运行稳定且配置只有镜像变化",
+        "失败时该服务回到旧镜像并停止后续服务；旧镜像也起不来时转为 STOP 发布",
+        "观察健康检查、Bridge 的 bridge_shutdown_report 与 owner_backfill 日志",
     ],
     "A": [
+        "确认 Bridge 预检中的暂存输入为 0（STOP 会把仍在暂存的消息记为 OWNER_STOPPED 并删除）",
         "Core 执行 STOP（同一份授权）；Bridge 执行 owner-handoff-prepare",
         "确认 API 以外的 worker、Bridge、Reader 都已退出",
         "换镜像，用同一份 policy 执行 preview/activate（revision +2）",
@@ -212,6 +298,7 @@ STEPS = {
         "观察健康检查、STOP 状态和日志",
     ],
     "B": [
+        "确认 Bridge 预检中的暂存输入为 0（STOP 会把仍在暂存的消息记为 OWNER_STOPPED 并删除）",
         "Core 执行 STOP（同一份授权）；Bridge 执行 owner-handoff-prepare",
         "确认 API、worker、Bridge、Reader 都已退出",
         "加密备份数据库，并单独复制最新遗忘日志",
@@ -223,6 +310,7 @@ STEPS = {
     ],
     "C": [
         "准备新的 policy（续期、purpose 或能力配置变化），交主人批准",
+        "确认 Bridge 预检中的暂存输入为 0（STOP 会把仍在暂存的消息记为 OWNER_STOPPED 并删除）",
         "Core 执行 STOP；确认所有写入进程已退出",
         "有未结 UNKNOWN 时走离线 carry 和 owner-carry-handoff-prepare；否则 owner-handoff-prepare",
         "加密备份数据库，复制最新遗忘日志；需要迁移时执行一次 `companion init`",
@@ -234,17 +322,46 @@ STEPS = {
 }
 
 
-def classify(changed, probe, policy_change=None, rolling=False):
+def protocol_mismatch(edge):
+    protocol = (edge or {}).get("protocol") or {}
+    return not protocol.get("bridge") or protocol["bridge"] != protocol.get("core")
+
+
+def edge_blockers(changed, edge):
+    """Why a Bridge replacement without STOP cannot proceed; empty when nothing blocks it.
+
+    The new Bridge inherits the old one's custody, so that custody must be ACTIVE with
+    nothing in flight, and it must speak the protocol of the Core it meets.
+    """
+    if "bridge" not in changed:
+        return []
+    if edge is None:
+        return ["BRIDGE_PREFLIGHT_NOT_RUN"]
+    blockers = []
+    custody = edge.get("custody") or {}
+    if custody.get("state") != "ACTIVE" or custody.get("stop_requested"):
+        blockers.append("BRIDGE_CUSTODY_NOT_ACTIVE")
+    if custody.get("unsettled_sends"):
+        blockers.append("BRIDGE_SEND_UNSETTLED")
+    if protocol_mismatch(edge):
+        blockers.append("BRIDGE_CORE_PROTOCOL_MISMATCH")
+    return blockers
+
+
+def classify(changed, probe, policy_change=None, rolling=False, edge=None):
     """Return (class, reasons). Pure, so the decision is testable without Docker.
 
     `rolling` turns A into R only when nothing but the Core image changes; a release that
-    also replaces Bridge, Reader or UI images keeps the STOP procedure.
+    also replaces Bridge, Reader or UI images keeps the STOP procedure. `edge` is the
+    Bridge preflight (`bridge_custody` and protocol digests) when the Bridge changes.
     """
     if not changed and not policy_change:
         return "NO_CHANGE", []
+    if "core" not in changed and not policy_change:
+        blockers = edge_blockers(changed, edge)
+        return ("NOT_READY", blockers) if blockers else ("EDGE", [])
     if probe is None:
-        return ("EDGE", []) if "core" not in changed and not policy_change else (
-            "NOT_READY", ["PROBE_NOT_RUN"])
+        return "NOT_READY", ["PROBE_NOT_RUN"]
     if probe.get("error"):
         return "NOT_READY", [probe["error"]]
     migration = probe["migration"]
@@ -256,6 +373,9 @@ def classify(changed, probe, policy_change=None, rolling=False):
     authority = probe.get("authority", {})
     if authority.get("state") == "UNREADABLE":
         blockers.append("AUTHORITY_UNREADABLE")
+    # STOP hands the old custody off, but the new Bridge must still match the new Core.
+    if "bridge" in changed and edge is not None and protocol_mismatch(edge):
+        blockers.append("BRIDGE_CORE_PROTOCOL_MISMATCH")
     if blockers:
         return "NOT_READY", blockers
     reasons = []
@@ -299,6 +419,23 @@ def report(plan):
                   f"- 未结工作：任务 {before['active_jobs']}，待发送 {before['open_deliveries']}"
                   f"（不确定 {before['uncertain_deliveries']}），"
                   f"UNKNOWN 模型调用 {before['unknown_model_calls']}"]
+    edge = plan.get("edge") or {}
+    if edge:
+        custody = edge.get("custody") or {}
+        lines += ["", "## Bridge 预检（只读）", "",
+                  f"- 授权状态：{custody.get('state')}"
+                  + ("，已请求 STOP" if custody.get("stop_requested") else ""),
+                  f"- 未结发送：{custody.get('unsettled_sends') or 0}，"
+                  f"暂存输入 {custody.get('held_inputs', 0)}，"
+                  f"待上传输入 {custody.get('pending_inputs', 0)}",
+                  *(["- 与 Core 的协议包：" + ("不一致或无法读取" if protocol_mismatch(edge)
+                                             else "一致")] if "protocol" in edge else [])]
+    if plan.get("versions"):
+        lines += ["", "## 运行版本", ""]
+        for name, version in sorted(plan["versions"].items()):
+            revision = next(iter(version["revision"].values()), "未标注")
+            lines.append(f"- {name}：{version['image'][:19]}，代码 {revision[:12]}，"
+                         f"只读配置 {len(version['configs'])} 个")
     lines += ["", "## 步骤", ""]
     lines += [f"{i}. {step}" for i, step in enumerate(STEPS.get(plan["class"], []), 1)]
     if plan["class"] == "NOT_READY":
@@ -319,10 +456,20 @@ def main():
                         help="Plan an A release as a rolling worker restart (class R)")
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    targets = dict(item.split("=", 1) for item in args.target)
+    targets = {group: image_id(image) for group, image in
+               (item.split("=", 1) for item in args.target)}
     args.output.mkdir(mode=0o700, parents=True, exist_ok=False)
-    current = services(containers(args.project))
+    inspected = containers(args.project)
+    current = services(inspected)
     changed = changes(current, targets)
+    # Read-only and cheap; a STOP release must also know what the Bridge still holds.
+    edge = {"custody": bridge_custody(current["bridge"])} if "bridge" in current else None
+    if "bridge" in changed:
+        core_image = (changed["core"]["to"] if "core" in changed
+                      else current["companion-api"]["image"])
+        core_python = (current["companion-api"]["entrypoint"] or ["/app/.venv/bin/python"])[0]
+        edge["protocol"] = {"bridge": protocol_digest(changed["bridge"]["to"], "python"),
+                            "core": protocol_digest(core_image, core_python)}
     probe = None
     if "core" in changed or args.policy_change:
         image = changed["core"]["to"] if "core" in changed else current["companion-api"]["image"]
@@ -334,9 +481,10 @@ def main():
                 probe["unknown_closed"] = closed_unknowns(current["companion-api"])
         finally:
             shutil.rmtree(workspace, ignore_errors=True)
-    kind, reasons = classify(changed, probe, args.policy_change, rolling=args.rolling)
+    kind, reasons = classify(changed, probe, args.policy_change, rolling=args.rolling,
+                             edge=edge)
     plan = {"schema_version": 1, "project": args.project, "class": kind, "reasons": reasons,
-            "changes": changed, "probe": probe,
+            "changes": changed, "probe": probe, "edge": edge, "versions": versions(inspected),
             "services": {name: {"image": svc["image"], "state": svc["state"]}
                          for name, svc in current.items()}}
     (args.output / "plan.json").write_text(json.dumps(plan, indent=2, ensure_ascii=False)

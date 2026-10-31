@@ -1,5 +1,6 @@
 """Release plan: probe on a copy, classification and Compose inspection, without Docker."""
 
+import hashlib
 import sqlite3
 from datetime import timedelta
 
@@ -63,7 +64,8 @@ BRIDGE = {"bridge": {"from": "c", "to": "d", "services": ["bridge"]}}
 
 @pytest.mark.parametrize(("changed", "value", "policy", "expected"), [
     ({}, None, None, "NO_CHANGE"),
-    (BRIDGE, None, None, "EDGE"),
+    ({"ui": {"from": "u", "to": "v", "services": ["console-ui"]}}, None, None, "EDGE"),
+    (BRIDGE, None, None, "NOT_READY"),
     (CORE, probe(), None, "A"),
     (CORE, probe(needed=True), None, "B"),
     (CORE, probe(problem="OWNER_AUTHORITY_CAPABILITY_CHANGED"), None, "C"),
@@ -159,3 +161,67 @@ def test_unknown_closure_is_read_from_the_live_journal(tmp_path):
     with journal.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps({"kind": "model_unknown_carry", "request_id": "model_b"}) + "\n")
     assert plan.closed_unknowns(api) is True
+
+
+GOOD_EDGE = {"custody": {"state": "ACTIVE", "stop_requested": False, "unsettled_sends": {},
+                         "held_inputs": 0, "pending_inputs": 0},
+             "protocol": {"bridge": "1" * 64, "core": "1" * 64}}
+
+
+@pytest.mark.parametrize(("change", "reason"), [
+    (None, None),
+    ({"custody": {**GOOD_EDGE["custody"], "state": "STOPPED"}}, "BRIDGE_CUSTODY_NOT_ACTIVE"),
+    ({"custody": {**GOOD_EDGE["custody"], "stop_requested": True}},
+     "BRIDGE_CUSTODY_NOT_ACTIVE"),
+    ({"custody": {**GOOD_EDGE["custody"], "unsettled_sends": {"IO_STARTED": 1}}},
+     "BRIDGE_SEND_UNSETTLED"),
+    ({"protocol": {"bridge": "2" * 64, "core": "1" * 64}}, "BRIDGE_CORE_PROTOCOL_MISMATCH"),
+    ({"protocol": {"bridge": None, "core": "1" * 64}}, "BRIDGE_CORE_PROTOCOL_MISMATCH"),
+])
+def test_a_bridge_only_release_needs_settled_custody_and_the_same_protocol(change, reason):
+    edge = {**GOOD_EDGE, **(change or {})}
+    kind, reasons = plan.classify(BRIDGE, None, edge=edge)
+    assert (kind, reasons) == (("EDGE", []) if reason is None else ("NOT_READY", [reason]))
+
+
+def test_a_bridge_released_with_core_still_needs_the_new_core_protocol():
+    edge = {**GOOD_EDGE, "protocol": {"bridge": "2" * 64, "core": "1" * 64}}
+    changed = {**CORE, **BRIDGE}
+    assert plan.classify(changed, probe(), edge=edge) == (
+        "NOT_READY", ["BRIDGE_CORE_PROTOCOL_MISMATCH"])
+    # With STOP an unsettled Bridge custody is handed off, not blocking.
+    stopped = {**GOOD_EDGE, "custody": {"state": "STOPPED"}}
+    assert plan.classify(changed, probe(), edge=stopped)[0] == "A"
+
+
+def test_bridge_custody_reads_the_spool_without_writing(tmp_path):
+    db = sqlite3.connect(tmp_path / "spool.sqlite3")
+    db.executescript(
+        "CREATE TABLE inbox(key,state);CREATE TABLE owner_runtime(id,state);"
+        "CREATE TABLE window_attempts(message_id,state);"
+        "CREATE TABLE held_inputs(event_id,state);"
+        "INSERT INTO owner_runtime VALUES(1,'ACTIVE');"
+        "INSERT INTO window_attempts VALUES('m1','ACK'),('m2','IO_STARTED');"
+        "INSERT INTO held_inputs VALUES('e1','HELD'),('e2','PROMOTED');"
+        "INSERT INTO inbox VALUES('e3','pending');")
+    db.commit()
+    db.close()
+    bridge = {"mounts": [{"type": "bind", "source": str(tmp_path), "rw": True}]}
+    assert plan.bridge_custody(bridge) == {
+        "state": "ACTIVE", "stop_requested": False, "unsettled_sends": {"IO_STARTED": 1},
+        "held_inputs": 1, "pending_inputs": 1}
+    (tmp_path / ("owner-" + "a" * 64 + ".stop")).write_text("OWNER_STOP\n")
+    assert plan.bridge_custody(bridge)["stop_requested"] is True
+
+
+def test_versions_record_revision_labels_and_read_only_config_hashes(tmp_path):
+    config = tmp_path / "bridge.toml"
+    config.write_bytes(b"a = 1\n")
+    item = inspected("bridge", "bridge1", [
+        {"Type": "bind", "Source": str(config), "Destination": "/private/bridge.toml",
+         "RW": False},
+        {"Type": "bind", "Source": str(tmp_path), "Destination": "/data", "RW": True}])
+    item["Config"]["Labels"]["com.companion.revision"] = "833fa25f6227"
+    assert plan.versions([item]) == {"bridge": {
+        "image": "bridge1", "revision": {"com.companion.revision": "833fa25f6227"},
+        "configs": {"/private/bridge.toml": hashlib.sha256(b"a = 1\n").hexdigest()}}}

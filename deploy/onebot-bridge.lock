@@ -403,6 +403,10 @@ pydantic-core==2.50.1 \
     --hash=sha256:f5187624823423e1d1b82b1072ac41dc837389e18d3d0572cc19bbee46cd550a \
     --hash=sha256:fe90228920fd8ff2be62622b6bb8a2b11acd65046d50c6b130614b5879605a20
     # via -r deploy/onebot-bridge.in
+schedule==1.2.2 \
+    --hash=sha256:15fe9c75fe5fd9b9627f3f19cc0ef1420508f9f9a46f45cd0769ef75ede5f0b7 \
+    --hash=sha256:5bef4a2a0183abf44046ae0d164cadcac21b1db011bdd8102e4a0c1e91e06a7d
+    # via -r deploy/onebot-bridge.in
 silk-python==0.2.8 \
     --hash=sha256:62e2e87be6b5848ab80b3384920b920deaeea90141c1494729f877a0912a7cbf \
     --hash=sha256:7e7be31f3b3aa6902fdb86c3188961075a5bd153c61f37dd53ebddb82817fa63

@@ -203,7 +203,7 @@ def _snapshot(runtime):
     records, head = owner_native_resolution._stopped(runtime)
     material = {}
     for table in ("identity", "owner_runtime", "window_inputs", "window_attempts", "inbox",
-                  "results", "automatic_recalls", "automatic_media"):
+                  "results", "automatic_recalls", "automatic_media", "held_inputs"):
         if runtime.db.execute("SELECT 1 FROM sqlite_master WHERE name=?", (table,)).fetchone():
             material[table] = sorted(_rows(runtime.db, f"SELECT * FROM {table}"),
                                      key=wire.canonical)

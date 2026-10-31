@@ -87,7 +87,14 @@ def private_http_client(url, token, *, check=None, transport=None):
             original.scheme, original.host, original.port
         ):
             raise ValueError("PRIVATE_HTTP_AUTHORITY_CHANGED")
-        address = await resolve_private(parsed.hostname, parsed.port)
+        try:
+            address = await resolve_private(parsed.hostname, parsed.port)
+        except (OSError, TimeoutError):
+            # A stopped Compose service has no DNS record. Report it as the transport
+            # failure it is, so callers back off or hold input instead of treating a
+            # name lookup error as a closed event socket or an unexpected crash.
+            raise httpx.ConnectError("PRIVATE_HTTP_RESOLUTION_FAILED",
+                                     request=request) from None
         if not private_address(address):
             raise ValueError("PUBLIC_DNS_REFUSED")
         request.headers["Host"] = parsed.netloc

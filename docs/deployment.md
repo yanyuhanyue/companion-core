@@ -57,13 +57,45 @@ python3 scripts/release_plan.py --project companion-main --target core=<镜像ID
 | 类型 | 含义 |
 | --- | --- |
 | `NO_CHANGE` | 没有需要部署的变化 |
-| `EDGE` | 只有 Bridge、Reader 或 UI 镜像变化；空闲时只重启这些服务 |
+| `EDGE` | 只有 Bridge、Reader 或 UI 镜像变化：不停写，用 `scripts/edge_release.py` 逐个替换 |
+| `R` | 加 `--rolling` 且只有 Core 镜像变化、无迁移、policy 有效：用 `scripts/rolling_worker_release.py` 逐个替换 worker |
 | `A` | Core 代码变化，不需要迁移，policy 仍然有效：停写，换镜像，用同一份 policy 恢复，交接 |
 | `B` | 在 A 的基础上需要迁移：另需备份，并执行一次 `companion init` |
 | `C` | policy 失效或要求变更（续期、purpose）：需要主人批准新的 policy；有 UNKNOWN 时走 carry |
 | `NOT_READY` | 副本存在发布无法自行解决的阻断项，先处理再重新预检 |
 
 `plan.md` 按类型列出发布步骤。要续期或增加 purpose 时，加 `--policy-change <原因>`。
+预检还只读地查看 Bridge 的 Spool（授权状态、未结发送、暂存输入、待上传输入），并记录每个服务的
+镜像、部署标签上的代码版本和只读配置文件的 SHA-256。
+
+### 各服务的更新条件
+
+| 服务 | 不停写更新的条件 | 依赖 | 失败时 | 仍需 STOP 发布 |
+| --- | --- | --- | --- | --- |
+| Core worker（`R`） | 只有 Core 镜像变化；副本上无需迁移；policy 在新代码下有效；没有未关闭的 UNKNOWN | API 继续跑旧代码 | 该 worker 回到旧镜像，后续 worker 不再处理 | 迁移、policy 失效、付费合同或能力配置变化 |
+| Core API | 不单独滚动；随 A/B/C 停写更新 | worker、Bridge、Reader 都连它 | 按 A/B/C 的恢复步骤 | 每次 API 代码变化 |
+| Bridge（`EDGE`） | 授权 ACTIVE 且没有 STOP 标记；没有 `RESERVED/IO_STARTED/UNKNOWN` 发送；新 Bridge 的 `companion_delivery_protocol` 与运行中的 Core 相同；配置文件不变 | Core API、SnowLuma | 回到旧镜像；旧镜像读不了新进程写下的记录时会拒绝启动，回执写 `STOP_RELEASE_REQUIRED` | 协议包不同、Bridge 配置变化、授权已 STOP |
+| Reader、UI（`EDGE`） | 只有镜像变化，配置不变 | Core API | 回到旧镜像 | 配置变化 |
+
+脚本在任一步失败时立即停止，不再处理后面的服务。回退只换回旧镜像：新进程已经写入的账本、
+发送确认、隐私删除和 Bridge journal 记录保持原样，不会被删除或改写。
+
+### 替换 Bridge、Reader 和 UI
+
+```bash
+python3 scripts/edge_release.py --project companion-main --plan <私有目录>/plan.json --target bridge=<镜像ID> --output <新的私有目录>
+```
+
+顺序固定为 UI、Reader、Bridge。Bridge 先用 90 秒宽限平滑停止：不再领取新的接收、上传、发送和
+媒体单元，当前单元做完后退出。退出时 Bridge 输出 `bridge_shutdown_report`，列出未结发送、
+待上传输入、待回报结果和暂存输入；有开始了 I/O 却没有平台结果的发送时退出码为 3，脚本拒绝继续，
+这条发送只能走 reconcile，不会自动重发。新 Bridge 必须重新持有 `instance.lock` 并连上 WebSocket，
+再稳定 20 秒。新旧 Bridge 不会同时运行，因此不会同时写 Spool 或 owner journal。
+
+回执 `receipt.json` 记录每个服务的新旧镜像、镜像自带和部署标签上的代码版本、停止开始、退出、
+启动和就绪时间，以及 Bridge 的退出报告、补收报告（`owner_backfill`）和暂存输入的处理结果。
+`delivery_evidence` 固定为 `PLATFORM_ACK_ONLY`：发送成功只表示 OneBot 返回了 `message_id`，
+客户端是否显示、主人是否已读都无法从 OneBot v11 得知，系统不记录这两种状态。
 
 ## 启动核心容器
 

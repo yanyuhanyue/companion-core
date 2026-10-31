@@ -116,3 +116,63 @@ def test_lock_holders_match_the_exact_inode(tmp_path):
             f"2: FLOCK  ADVISORY  WRITE 4343 {device}:{info.st_ino + 1} 0 EOF\n"
             f"3: POSIX  ADVISORY  WRITE 4444 {device}:{info.st_ino} 0 EOF\n")
     assert rolling.lock_holders(path, text) == [4242]
+
+
+def edge_plan(**overrides):
+    current = rows()
+    value = {"class": "EDGE", "changes": {"bridge": {"from": "sha256:" + "c" * 64, "to": NEW,
+                                                     "services": ["bridge"]}},
+             "services": {name: {"image": item["Image"]} for name, item in current.items()}}
+    value.update(overrides)
+    return value
+
+
+def test_edge_release_replaces_only_planned_edge_services():
+    from scripts import edge_release
+
+    assert edge_release.plan_steps(edge_plan(), rows(), {"bridge": NEW}) == [
+        ("bridge", "bridge")]
+    with pytest.raises(ValueError, match="EDGE"):
+        edge_release.plan_steps(edge_plan(**{"class": "R"}), rows(), {"bridge": NEW})
+    with pytest.raises(ValueError, match="targets"):
+        edge_release.plan_steps(edge_plan(), rows(), {"bridge": NEW, "ui": NEW})
+    with pytest.raises(ValueError, match="different"):
+        edge_release.plan_steps(edge_plan(), rows(), {"bridge": OLD})
+    drifted = rows()
+    drifted["bridge"]["Image"] = OLD
+    with pytest.raises(ValueError, match="changed since"):
+        edge_release.plan_steps(edge_plan(), drifted, {"bridge": NEW})
+
+
+def test_edge_release_reads_only_json_events_from_logs(monkeypatch):
+    from scripts import edge_release
+
+    class Result:
+        stdout = ('{"event": "owner_backfill", "added": 1}\nplain text\n'
+                  '{"stage": "ws_connected"}\n{broken\n')
+        stderr = ""
+
+    monkeypatch.setattr(rolling, "docker", lambda *args, **kwargs: Result())
+    assert edge_release.events("bridge-id", "owner_backfill") == [
+        {"event": "owner_backfill", "added": 1}]
+    assert edge_release.events("bridge-id", "ws_connected") == [{"stage": "ws_connected"}]
+
+
+def test_a_worker_left_on_a_newer_image_by_an_earlier_roll_is_still_rolled():
+    current = rows()
+    middle = "sha256:" + "f" * 64
+    current["companion-worker"]["Image"] = middle
+    value = plan(services={name: {"image": item["Image"]} for name, item in current.items()})
+    assert rolling.plan_services(value, current, NEW) == [
+        "companion-content-worker", "companion-life-worker", "companion-worker"]
+    current["companion-worker"]["Image"] = NEW
+    value["services"]["companion-worker"]["image"] = NEW
+    assert rolling.plan_services(value, current, NEW) == [
+        "companion-content-worker", "companion-life-worker"]
+
+
+def test_core_changes_include_workers_that_run_a_newer_image():
+    current = {"companion-api": {"image": OLD}, "companion-worker": {"image": NEW},
+               "bridge": {"image": "sha256:" + "c" * 64}}
+    assert release_plan.changes(current, {"core": "sha256:" + "d" * 64})["core"][
+        "services"] == ["companion-api", "companion-worker"]

@@ -258,6 +258,11 @@ class OwnerRuntime:
                 if value["event_id"] in inputs:
                     raise ValueError("OWNER_JOURNAL_RECONCILIATION_REQUIRED")
                 inputs[value["event_id"]] = value["capture_sha256"]
+            elif record["kind"] == "INPUT_HELD":
+                if state != "ACTIVE":
+                    raise ValueError("OWNER_JOURNAL_RECONCILIATION_REQUIRED")
+            elif record["kind"] == "INPUT_HOLD_CLOSED":
+                pass  # Checked against the held_inputs projection below.
             elif record["kind"] == "PROFILE_PROBE_STARTED":
                 if state != "ACTIVE" or record["data"] != {"authority": current}:
                     raise ValueError("OWNER_JOURNAL_RECONCILIATION_REQUIRED")
@@ -333,9 +338,10 @@ class OwnerRuntime:
         actual_inputs = self._inputs(references)
         if actual_inputs != inputs:
             raise ValueError("OWNER_JOURNAL_RECONCILIATION_REQUIRED")
-        from . import owner_notices
+        from . import held_inputs, owner_notices
 
         owner_notices.verify(self, records, references=references)
+        held_inputs.verify(self, records, references=references)
         from . import pending_media
 
         pending_media.verify_owner_history(self, records)
@@ -394,8 +400,9 @@ class OwnerRuntime:
             with self.db:
                 self.append("OWNER_STOPPED", {"authority": self.authority})
                 self.db.execute("UPDATE owner_runtime SET state='STOPPED' WHERE id=1")
-        from . import pending_media
+        from . import held_inputs, pending_media
 
+        held_inputs.close_all(self, "OWNER_STOPPED")
         pending_media.stop(self)
 
     async def check(self, core_client, *, purpose="chat"):
