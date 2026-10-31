@@ -2,6 +2,7 @@
 
 import json
 
+import httpx
 import pytest
 
 from companion import turn_taking
@@ -10,8 +11,11 @@ from companion.contracts import LeaseRequest
 from companion.model import ModelResponse
 from companion.transport import lease_deliveries
 from companion.turn_taking import SILENCE_RULES, TurnTakingConfig
-from tests.conftest import ingest, run
+from tests.conftest import event, ingest, run
 from tests.notice_owner_fixtures import run_notice
+from tests.test_life_worker_integration import process_worker
+from tests.test_onebot_capture import real_core_http
+from tests.test_social_owner_authority import authorize
 
 
 class Model:
@@ -244,3 +248,55 @@ def test_the_life_worker_selector_schedules_and_words_the_follow_up(core):
     assert [item["content"] for item in items] == [{"text": "对了，里面那个配角其实挺出彩的。"}]
     assert {row["scenario"] for row in core.store.rows(
         "SELECT scenario FROM model_usage WHERE state='SETTLED'")} == {"chat", "activity"}
+
+
+def test_real_http_and_independent_worker_settle_one_follow_up_across_restart(core, tmp_path):
+    enable(core)
+
+    async def exercise():
+        async with real_core_http(core) as port, httpx.AsyncClient(
+            base_url=f"http://127.0.0.1:{port}", trust_env=False,
+            headers={"Authorization": "Bearer " + core.settings.bridge_token.get_secret_value()},
+        ) as http:
+            for number, text, reply in (
+                (1, "我刚看完那部电影", "结局你喜欢吗？"),
+                (2, "还行，就是有点仓促", "我也觉得后半段太赶了。"),
+            ):
+                core.model.chat.append(reply)
+                message = event(core, number, text)
+                accepted = await http.post("/internal/v1/inbox/events",
+                    json=message.model_dump(mode="json"),
+                    headers={"X-Idempotency-Key": message.event_id})
+                assert accepted.status_code == 202, accepted.text
+                assert await core.run_once("chat-entrypoint")
+                # The delivered chat turns are the synthetic prior state of this lull.
+                core.store.execute("UPDATE outbox SET state='SENT',sent_at=? WHERE state='PENDING'",
+                                   (core.clock(),))
+                core.clock.advance(60)
+            _, authority = authorize(core, tmp_path, account=False,
+                                     additional_purposes=("proactive",))
+            core.clock.advance(900)
+            observed = await process_worker(core, tmp_path, "followup", "evt_test_2")
+            assert observed["provider_calls"] == 1
+            assert observed["materials"][0]["kind"] == "followup"
+            assert {unit["lane"] for unit in observed["units"] if unit["progressed"]} >= {
+                "follow_up", "activity",
+            }
+            usage = core.store.rows("SELECT * FROM model_usage WHERE scenario='activity'")
+            assert len(usage) == 1 and usage[0]["state"] == "SETTLED"
+            leased = await http.post("/internal/v1/deliveries/lease", json={
+                "worker_id": "bridge", "authority": authority,
+            })
+            assert leased.status_code == 200, leased.text
+            items = leased.json()["items"]
+            assert [item["action_type"] for item in items] == ["qq.private.proactive"]
+            assert [item["content"] for item in items] == [
+                {"text": "对了，里面那个配角其实挺出彩的。"},
+            ]
+            restarted = await process_worker(core, tmp_path, "followup", "evt_test_2", restart=True)
+            assert restarted["provider_calls"] == 0
+            assert len(core.store.rows("SELECT 1 FROM model_usage WHERE scenario='activity'")) == 1
+            assert len(core.store.rows("SELECT 1 FROM outbox WHERE action_type="
+                                       "'qq.private.proactive'")) == 1
+
+    run(exercise())

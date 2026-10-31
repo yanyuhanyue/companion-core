@@ -2,9 +2,7 @@
 Autonomy engines: strategic layer algorithms for portfolio optimization and self-reflection.
 """
 
-import json
-from datetime import datetime, timedelta
-from typing import Any
+from datetime import datetime
 
 from companion.autonomy import (
     InterestPortfolio,
@@ -12,7 +10,6 @@ from companion.autonomy import (
     PortfolioStrategy,
     ReflectionInsight,
     ReflectionSchedule,
-    sessions_to_depth,
 )
 from companion.util import uid
 
@@ -58,7 +55,8 @@ def rebalance_portfolio(
         current_tier = _get_tier(trait_id, portfolio)
 
         # Exploratory -> Satellite
-        if current_tier == "exploratory" and sessions >= PortfolioStrategy.PROMOTE_TO_SATELLITE_SESSIONS:
+        if (current_tier == "exploratory"
+            and sessions >= PortfolioStrategy.PROMOTE_TO_SATELLITE_SESSIONS):
             if len(portfolio.satellite_interests) < portfolio.max_satellite_interests:
                 changes["promotions"].append(PortfolioChange(
                     change_type="promotion",
@@ -298,7 +296,8 @@ def _reflect_on_progress(
                     reflection_type="progress",
                     observation=f"在 {topic} 方面取得显著进展",
                     evidence=[s.get("event_id", "") for s in recent_sessions],
-                    interpretation=f"过去 {len(recent_sessions)} 次探索中有 {successes} 次成功，学习效率高",
+                    interpretation=(f"过去 {len(recent_sessions)} 次探索中有 {successes} 次成功，"
+                                    "学习效率高"),
                     confidence=min(0.95, success_rate),
                     created_at=now
                 ))
@@ -364,13 +363,16 @@ def _suggest_adjustments(
         max_count = max(trait_counts.values())
         if max_count > 10:  # More than 50% concentration
             dominant_trait = max(trait_counts, key=trait_counts.get)
-            dominant_topic = next((i["topic"] for i in interests if i["trait_id"] == dominant_trait), "未知")
+            dominant_topic = next(
+                (i["topic"] for i in interests if i["trait_id"] == dominant_trait), "未知",
+            )
 
             insights.append(ReflectionInsight(
                 reflection_id=uid("reflection"),
                 reflection_type="adjustment",
                 observation=f"探索活动过度集中在 {dominant_topic}",
-                evidence=[a.get("event_id", "") for a in activities if a.get("trait_id") == dominant_trait],
+                evidence=[a.get("event_id", "") for a in activities
+                          if a.get("trait_id") == dominant_trait],
                 interpretation=f"最近20次探索中有{max_count}次关于同一话题，可能缺乏多样性",
                 confidence=0.85,
                 suggested_action="建议增加其他话题的探索，保持组合平衡",
@@ -409,7 +411,8 @@ def _identify_discoveries(
                     reflection_type="discovery",
                     observation=f"新发现兴趣领域：{topic}",
                     evidence=[s.get("event_id", "") for s in sessions],
-                    interpretation=f"在过去 {days_since_first} 天内进行了 {len(sessions)} 次探索，显示出强烈兴趣",
+                    interpretation=(f"在过去 {days_since_first} 天内进行了 {len(sessions)} 次探索，"
+                                    "显示出强烈兴趣"),
                     confidence=0.8,
                     created_at=now
                 ))
@@ -472,7 +475,7 @@ def _analyze_topic_clustering(activities: list[dict], interests: list[dict]) -> 
     if max_consecutive >= 3:
         return {
             "strength": min(1.0, max_consecutive / 5),
-            "description": f"倾向于连续探索同一话题",
+            "description": "倾向于连续探索同一话题",
             "evidence_ids": [a.get("event_id", "") for a in activities],
             "interpretation": f"最长连续探索同一话题 {max_consecutive} 次，显示专注特征"
         }

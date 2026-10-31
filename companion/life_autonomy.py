@@ -3,14 +3,10 @@ Life autonomy integration: connect tactical/strategic layers to Life loop decisi
 """
 
 from datetime import datetime, timedelta
-from typing import Any
 
 from companion.autonomy import (
     ExplorationStrategy,
     InterestPortfolio,
-    InterestPriority,
-    PortfolioStrategy,
-    sessions_to_depth,
 )
 from companion.autonomy_store import AutonomyStore
 from companion.autonomy_strategic import (
@@ -23,7 +19,6 @@ from companion.autonomy_tactical import (
     should_continue_exploration,
     update_exploration_metrics,
 )
-from companion.util import uid
 
 
 class LifeAutonomy:
@@ -273,7 +268,8 @@ class LifeAutonomy:
             "expert": 50,
         }
 
-        if updated_strategy.sessions_invested >= expected_sessions.get(updated_strategy.current_depth, 999):
+        if (updated_strategy.sessions_invested
+            >= expected_sessions.get(updated_strategy.current_depth, 999)):
             # Advance depth if learning velocity is good
             if updated_strategy.learning_velocity >= 0.6:
                 depth_order = ["surface", "shallow", "moderate", "deep", "expert"]

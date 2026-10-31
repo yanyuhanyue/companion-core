@@ -4,7 +4,6 @@ Autonomy store: database operations for tactical and strategic layers.
 
 import json
 from datetime import datetime
-from typing import Any
 
 from companion.autonomy import (
     ExplorationStrategy,
@@ -293,7 +292,7 @@ class AutonomyStore:
         )
 
         if os.path.exists(schema_path):
-            with open(schema_path, "r", encoding="utf-8") as f:
+            with open(schema_path, encoding="utf-8") as f:
                 schema_sql = f.read()
 
             # Execute each statement

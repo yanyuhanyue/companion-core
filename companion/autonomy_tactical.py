@@ -92,7 +92,6 @@ def should_continue_exploration(
     expected_sessions = DEPTH_LEVELS[strategy.current_depth]["sessions"]
     if strategy.sessions_invested >= expected_sessions * 1.2:  # 120% of expected
         if roi >= strategy.continuation_threshold:
-            next_depth = depth_order[current_idx + 1] if current_idx < len(depth_order) - 1 else strategy.current_depth
             return DepthDecision(
                 action="deepen",
                 reason=f"已完成{strategy.sessions_invested}次探索，准备进入下一深度",

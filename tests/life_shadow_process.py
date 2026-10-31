@@ -78,7 +78,7 @@ async def main():
     async def provider(request):
         assert request.url.host == "synthetic.invalid"
         material = json.loads(json.loads(request.content)["messages"][-1]["content"])
-        assert material["kind"] == "life"
+        assert material["kind"] == ("followup" if args["scenario"] == "followup" else "life")
         calls.append(material)
         print("LIFE_PROVIDER_STARTED", flush=True)
         assert await asyncio.to_thread(sys.stdin.readline) == "continue\n"
@@ -89,14 +89,17 @@ async def main():
             "reason": "仍未结束" if scenario == "bug" else "实际来源",
             "text": "昨天那个导出问题有新线索了吗？" if scenario == "bug"
             else "这段资料留下了一个值得继续探索的想法。"}
-        body = {"choices": [{"message": {"role": "assistant", "content": json.dumps(
-            proposal, ensure_ascii=False)}, "finish_reason": "stop"}]}
+        content = ("对了，里面那个配角其实挺出彩的。" if scenario == "followup"
+                   else json.dumps(proposal, ensure_ascii=False))
+        body = {"choices": [{"message": {"role": "assistant", "content": content},
+                             "finish_reason": "stop"}]}
         if scenario != "unknown":
             body["usage"] = {"prompt_tokens": 180, "completion_tokens": 60}
         return httpx.Response(200, json=body)
 
     result = await run_native(settings, lambda: args["now"], provider,
-                              stop_on_idle=args.get("restart", False))
+                              stop_on_idle=args.get("restart", False)
+                              or args["scenario"] == "followup")
     result.update(provider_calls=len(calls), materials=calls)
     await asyncio.to_thread(Path(args["result_path"]).write_text,
                             json.dumps(result, ensure_ascii=False), encoding="utf-8")

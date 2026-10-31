@@ -2,8 +2,6 @@
 Multi-goal coordinator: conflict detection and resolution for concurrent exploration goals.
 """
 
-import json
-from typing import Any
 
 from companion.autonomy import GoalConflict, ResourceAllocation
 from companion.util import uid
@@ -86,7 +84,7 @@ def _detect_exclusive_conflicts(goals: list[dict], now: str) -> list[GoalConflic
         topic_groups[topic].append(goal["goal_id"])
 
     # Check for over-concentration
-    for topic, goal_ids in topic_groups.items():
+    for goal_ids in topic_groups.values():
         if len(goal_ids) > 2:  # More than 2 goals on same topic
             conflicts.append(GoalConflict(
                 goal_ids=goal_ids,
@@ -142,7 +140,9 @@ def _has_cycle_dfs(
 # Conflict Resolution
 # ============================================================================
 
-def resolve_resource_conflict(goals: list[dict], total_budget: float = 100.0) -> list[ResourceAllocation]:
+def resolve_resource_conflict(
+    goals: list[dict], total_budget: float = 100.0,
+) -> list[ResourceAllocation]:
     """
     Resolve resource conflicts by allocating time budget.
 

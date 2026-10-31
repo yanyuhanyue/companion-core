@@ -451,9 +451,9 @@ def test_exact_lexical_gates_match_original_bridge(updates):
     assert meme_policy.context_allows(result, query.model_dump()) == bridge_allows(result, query)
 
 
-def test_pre_selector_snapshot_golden_and_history_fallback_are_preserved():
-    # Golden values generated from frozen B1a 64ac829's actual BridgeConfig, not
-    # from the new serializer. Neither includes any live credentials or data.
+def test_snapshot_binds_scheduled_import_and_preserves_history_fallback():
+    # Frozen synthetic snapshots include the scheduled-import setting. A changed
+    # scan policy must require new approval rather than match the older digest.
     config = BridgeConfig(
         owner_qq_id="10001",
         bot_qq_id="20002",
@@ -461,10 +461,16 @@ def test_pre_selector_snapshot_golden_and_history_fallback_are_preserved():
         onebot_token="s" * 32,
         protocol_epoch="legacy-epoch-01",
     )
-    original = "14d28e7c1564a057994f9bbf494074d420612c18430e680a5f7532564f3e580b"
-    historical = "88f6dbb70cdcc2987c20a66d584370103298f967372a0f137cf7eba63c89acdd"
+    original = "9c7ad9a950df994521dad682ff9cdd7ccbc8bd49e74c0aefb7a4e92debfdbc7e"
+    historical = "7e43aa2cf292847b7926398139c69986bd29f4be85bb5a7ec3a9290d5ec98239"
     assert bridge_digest(config.snapshot()) == original
     assert config_matches(config, original) and config_matches(config, historical)
+    assert config.snapshot()["scheduled_meme_import_enabled"] is True
+    disabled = replace(config, scheduled_meme_import_enabled=False)
+    assert not config_matches(disabled, original) and not config_matches(disabled, historical)
+    assert not config_matches(
+        config, "14d28e7c1564a057994f9bbf494074d420612c18430e680a5f7532564f3e580b",
+    )
     assert "history_backfill" not in config.snapshot()
     assert replace(config, history_backfill=True).snapshot()["history_backfill"] is True
     core = replace(config, meme_catalog_owner="core")

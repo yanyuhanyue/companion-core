@@ -7,7 +7,7 @@ Reuses existing authenticated capture and Core admission logic without changes.
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import schedule
@@ -55,7 +55,7 @@ async def run_scheduled_backfill(runtime, core, onebot, wake):
 
     try:
         added = await backfill(runtime, core, onebot, wake)
-        state.last_scan_time = datetime.now(timezone.utc)
+        state.last_scan_time = datetime.now(UTC)
         state.total_runs += 1
         state.save()
         logger.info(f"Scheduled import completed: {added} messages backfilled")
