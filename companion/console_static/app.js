@@ -256,7 +256,7 @@ const api = {
 
 function errorText(error) {
   const messages = {
-    STYLE_CANDIDATE_NOT_FOUND: "这条表达候选已经处理过或已过期。", STYLE_CANDIDATE_RISK_REJECT_ONLY: "这条候选带风险标记或来源理解不一致，只能拒绝。",
+    MEMORY_DISABLED: "长期记忆没有开启。", STYLE_CANDIDATE_NOT_FOUND: "这条表达候选已经处理过或已过期。", STYLE_CANDIDATE_RISK_REJECT_ONLY: "这条候选带风险标记或来源理解不一致，只能拒绝。",
     CONSOLE_NETWORK_ERROR: "连接中断了，请检查网络后重试。", CONSOLE_TIMEOUT: "服务器响应超时，请稍后重试。",
     CONSOLE_RESPONSE_INVALID: "服务器返回的数据不完整，请刷新核对。", CONSOLE_HTTPS_REQUIRED: "请通过 HTTPS 打开控制台后再操作。",
     CONSOLE_LOGIN_RATE_LIMIT: "密码错误次数过多，请 5 分钟后再试。", PROACTIVE_DISABLED_IN_CONFIG: "主动私聊在配置里是关闭的，先在配置里开启。",
@@ -469,7 +469,9 @@ const LOADERS = {
     }
     return { ...page, items };
   },
-  memories: signal => api.get("/memories?limit=60&review=" + (state.memTab === "review") + (state.memQ.trim() ? "&q=" + encodeURIComponent(state.memQ.trim()) : ""), signal),
+  memories: signal => state.memTab === "recall"
+    ? (state.memQ.trim() ? api.get("/memories/recall?q=" + encodeURIComponent(state.memQ.trim()), signal) : Promise.resolve({ items: [], query: "" }))
+    : api.get("/memories?limit=60&review=" + (state.memTab === "review") + (state.memQ.trim() ? "&q=" + encodeURIComponent(state.memQ.trim()) : ""), signal),
   life: async signal => {
     const [life, goals, reflections, topics] = await Promise.all([
       api.get("/life", signal), api.get("/goals", signal), api.get("/reflections", signal),
@@ -808,18 +810,33 @@ PAGES.activity = data => {
 const MEM_KIND = { preference: "偏好", fact: "事实", plan: "计划", habit: "习惯", relation: "关系", profile: "资料", event: "事件", communication: "沟通", goal: "目标" };
 const MEM_SUBJECT = { user: "关于你", owner: "关于你", self: "关于她", companion: "关于她" };
 function memSearch(v) { state.memQ = v; clearTimeout(state.searchTimer); state.searchTimer = setTimeout(() => loadRoute({ reset: true }), 300); }
+function recallView(data) {
+  const items = data.items || [];
+  if (!state.memQ.trim()) return empty("输入一句话试试", "按聊天时的同一套检索排序，显示她会想起哪些记忆、为什么。不调用模型。");
+  if (!items.length) return empty("没有会被想起的记忆", "这句话和现有记忆既没有字面重合，语义相似度也低于 " + (data.semantic_min_score ?? "阈值") + "。");
+  return el("ol", { class: "rows" }, items.map((m, i) => {
+    const r = m.recall || {};
+    const why = [r.exact ? "原文包含这句话" : null, r.lexical_rank ? "关键词第 " + r.lexical_rank + " 名" : null,
+      r.semantic_rank ? "语义第 " + r.semantic_rank + " 名" : null].filter(Boolean);
+    return el("li", { class: "block" },
+      el("div", { class: "row-gap" }, el("b", {}, (i + 1) + ". " + m.content), tag(m.status), m.needs_review ? el("span", { class: "chip" }, "有冲突") : null),
+      el("span", { class: "meta-line" }, why.map(w => el("span", { class: "chip" }, w)),
+        el("span", { class: "note num" }, "相似度 " + (r.similarity ?? "—") + "，融合分 " + (r.fused_score ?? "—")),
+        el("span", { class: "note" }, "来自 " + (m.evidence_ids || []).length + " 条消息")));
+  }));
+}
 PAGES.memories = data => {
   const items = data.items || [];
   const searchInput = el("input", { class: "input", id: "mem-q", type: "search", maxlength: "100", placeholder: "搜索记忆内容", value: state.memQ,
     oninput: e => { if (e.isComposing) return; memSearch(e.target.value); }, oncompositionend: e => memSearch(e.target.value) });
   return el("div", {}, head("记忆", "每条记忆都有原话作为来源。确认后她会在以后的对话里用到；忘记会同时清除来源和由此衍生的内容。"),
     el("div", { class: "toolbar" }, el("div", { class: "seg", role: "group" },
-      [["review", "待确认"], ["all", "全部"]].map(([k, n]) => el("button", { type: "button", "aria-pressed": String(state.memTab === k), onclick: () => { state.memTab = k; loadRoute({ reset: true }); } },
+      [["review", "待确认"], ["all", "全部"], ["recall", "召回测试"]].map(([k, n]) => el("button", { type: "button", "aria-pressed": String(state.memTab === k), onclick: () => { state.memTab = k; loadRoute({ reset: true }); } },
         n, k === "review" && state.nav?.review ? el("span", { class: "count" }, String(state.nav.review)) : null))),
       el("label", { class: "search" }, icon("search"), searchInput), el("span", { class: "spacer" }),
       el("div", { class: "seg", role: "group", "aria-label": "视图" }, [["list", "列表", "timeline"], ["graph", "关系图", "spark"]].map(([k, n, ic]) =>
         el("button", { type: "button", "aria-pressed": String(state.memView === k), onclick: () => { state.memView = k; rerender(); } }, icon(ic), n)))),
-    state.memView === "graph" ? memoryGraph(items) : items.length ? el("div", { class: "mem-list" }, items.map(m => {
+    state.memTab === "recall" ? recallView(data) : state.memView === "graph" ? memoryGraph(items) : items.length ? el("div", { class: "mem-list" }, items.map(m => {
       const d = m.detail || {}, review = m.status !== "CONFIRMED" || d.needs_review;
       return el("article", { class: "mem" + (review ? " review" : "") },
         el("div", {}, el("h3", {}, m.title), el("div", { class: "meta" }, tag(m.status), d.memory_kind ? el("span", { class: "chip" }, MEM_KIND[d.memory_kind] || "其他") : null,

@@ -107,11 +107,12 @@ async def prepare_memories(
             return candidates, [{"same": same["memory_id"] if same else None, "conflicts": []}]
     payload = {
         "existing": [
-            {"ref": ref, "subject": row["subject"], "content": row["content"]}
+            {"ref": ref, "subject": row["subject"], "kind": row["kind"],
+             "content": row["content"]}
             for ref, row in catalog.items()
         ],
         "candidates": [
-            {"ref": f"c{i}", "subject": row.subject, "content": row.content}
+            {"ref": f"c{i}", "subject": row.subject, "kind": row.kind, "content": row.content}
             for i, row in enumerate(candidates)
         ],
     }

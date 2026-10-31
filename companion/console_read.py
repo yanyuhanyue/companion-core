@@ -83,6 +83,19 @@ def memories(core, query="", review=False, limit=30):
     return collection(core, items)
 
 
+def recall(core, query, limit=10):
+    """The ranking chat recall would produce for a query, with its evidence; no model call."""
+    core.memory.require_owner("owner")
+    explain = {}
+    rows = core.memory.search(query, limit=limit, now=core.clock(), explain=explain)
+    return {"query": query, "semantic_min_score": core.settings.semantic_min_score,
+            "items": [{"id": row["memory_id"], "content": row["content"],
+                       "status": row["status"], "subject": row["subject"],
+                       "memory_kind": row["kind"], "needs_review": bool(row["needs_review"]),
+                       "evidence_ids": row["evidence_ids"],
+                       "recall": explain.get(row["memory_id"], {})} for row in rows]}
+
+
 def _source_records(core, query, owner_field, related_fields=(), *, job_field=None):
     version, now = read_version(core.memory), core.clock()
     sources, result, offset = MemorySources(core.memory, now), [], 0
