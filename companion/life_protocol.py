@@ -20,6 +20,7 @@ class LifeLoopConfig(StrictModel):
     max_daily_decisions: int = Field(default=2, ge=0, le=10)
     min_interval_seconds: int = Field(default=3600, ge=60, le=86400)
     read_goals_enabled: bool = False
+    autonomy_enabled: bool = False  # Enable tactical/strategic autonomy layers
 
 
 class LifeQZoneSourceGrant(StrictModel):
