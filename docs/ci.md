@@ -217,6 +217,26 @@ Each product shard uses the existing `scripts.test_feedback` entry point with tw
 pytest-xdist workers and `--dist=loadfile`. The shard plugin still selects the
 same complete files before xdist assigns those files to workers; no impact
 selection is enabled in CI. Module fixtures and parametrized cases stay together.
+Within each shard, files run in descending recorded duration, with path ties
+and stable case order inside each module. CI passes `--no-loadscope-reorder` so
+the native scheduler preserves this priority instead of reordering by case count.
+This uses the pinned xdist 3.8.0 [loadfile inheritance](https://github.com/pytest-dev/pytest-xdist/blob/v3.8.0/src/xdist/scheduler/loadfile.py)
+and its [loadscope ordering option](https://github.com/pytest-dev/pytest-xdist/blob/v3.8.0/src/xdist/scheduler/loadscope.py).
+Serial and one/two-worker subprocess checks verify exact-once case coverage,
+module fixture ownership and slow-file priority through the real scheduler.
+Product jobs precompile dependency bytecode once with the existing
+[uv option](https://docs.astral.sh/uv/reference/cli/#uv-run--compile-bytecode), then
+precompile checkout modules with Python's [compileall](https://docs.python.org/3.12/library/compileall.html)
+and checked source hashes. Independent API/worker/CLI processes can read that
+bytecode even with the existing [`-B`](https://docs.python.org/3.12/using/cmdline.html#cmdoption-B)
+write suppression. This avoids recompiling identical imports in each child.
+The preparation cost remains part of job timing; Console-only jobs skip it.
+The job's [PYTHONPYCACHEPREFIX](https://docs.python.org/3.12/using/cmdline.html#envvar-PYTHONPYCACHEPREFIX)
+keeps both dependency and source bytecode in `.local/python-bytecode`, outside
+public image COPY inputs. The pinned [uv compiler](https://github.com/astral-sh/uv/blob/0.12.10/crates/uv-installer/src/compile.rs)
+passes this environment to its Python workers. A real compile/import regression
+checks public input guards and stale-source invalidation with the workflow's
+actual prefix and compiler options. Bytecode remains excluded from release packages.
 The shared empty-schema fixture performs one real migration per job, then creates
 independent test databases. Each worker and its children keep their own scratch
 directory and real port tests continue binding kernel-assigned ports.
@@ -236,7 +256,7 @@ Weights use the slower platform's per-file JUnit total, including setup and
 teardown. The existing longest-first/lightest-shard algorithm balances those
 weights; unmeasured files retain a two-second estimate. No live cache, network
 lookup or mutable timing service changes collection. To refresh after substantial
-suite growth, download the successful run's complete `pytest-*` artifacts into
+suite growth or measured load drift, download the successful run's complete `pytest-*` artifacts into
 an owned `.local` directory, then run:
 
 ```powershell
@@ -251,6 +271,16 @@ full run just to update timings. Compare first-job-to-gate wall time separately
 from summed job/case time and queue delays. Four shards add runner startup and
 session-fixture overhead; if runner concurrency or costs dominate, reverting the
 matrix, shard count and reuse job set together restores the previous two shards.
+
+The October 31 refresh uses all eight JUnit reports from successful full run
+[41165362841](https://github.com/yanyuhanyue/companion-core/actions/runs/41165362841).
+Its slowest job took 954 seconds; the suite step accounted for 895 seconds.
+`test_model_carry_native.py` contained only eight cases but took 515.525 seconds
+on Ubuntu, making case count a poor dispatch priority. Repartitioning the same
+measured cases reduces Ubuntu per-shard totals from 935–1569 to 1237–1344 seconds
+and Windows totals from 1215–1550 to 1302–1412 seconds. These are summed case
+loads, not candidate wall-time predictions; the frozen candidate's full CI
+receipt supplies the actual wall time and queue delays.
 
 Full pytest runs report their 15 slowest cases to guide later work. The generic
 `core` fixture migrates an empty SQLite database once per pytest session, before

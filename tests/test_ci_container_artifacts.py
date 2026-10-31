@@ -4,7 +4,10 @@ import gzip
 import hashlib
 import io
 import json
+import os
+import shlex
 import subprocess
+import sys
 import zipfile
 from copy import deepcopy
 from pathlib import Path
@@ -245,7 +248,7 @@ def test_committed_context_excludes_dirty_private_inputs_and_rejects_copy_expans
 
 @pytest.mark.parametrize("value", [
     "private.key", "config.toml", ".env.production", "dump.sqlite3", "client.pem", "runtime.log",
-    "keys/nested.txt", "CONFIG.TOML",
+    "keys/nested.txt", "CONFIG.TOML", "__pycache__/module.pyc",
 ])
 @pytest.mark.parametrize("source_root", ["source_reader", "companion_meme_sources"])
 def test_public_copy_inputs_reject_nested_private_files(tmp_path, value, source_root):
@@ -273,6 +276,34 @@ def test_real_recipes_allow_shared_sources_only_in_core_and_bridge():
     images.check_public_inputs()
     assert {name for name, spec in images.COMPONENTS.items()
             if "companion_meme_sources" in spec["copies"]} == {"core", "bridge"}
+
+
+def test_workflow_precompilation_keeps_bytecode_outside_public_inputs(public_repository):
+    root = public_repository
+    workflow = yaml.safe_load((images.ROOT / ".github/workflows/ci.yml").read_text("utf-8"))
+    job = workflow["jobs"]["test"]
+    cache = Path(job["env"]["PYTHONPYCACHEPREFIX"].replace("${{ github.workspace }}", str(root)))
+    assert cache.is_relative_to(root / ".local")
+    step = next(step for step in job["steps"]
+                if step.get("name") == "Precompile repeated worker imports")
+    command = shlex.split(step["run"])
+    options = command[command.index("python") + 1:command.index("companion")]
+    source = root / "companion_meme_sources" / "bytecode_probe.py"
+    source.write_text("value = 41\n")
+    env = {**os.environ, "PYTHONPYCACHEPREFIX": str(cache), "PYTHONDONTWRITEBYTECODE": "1"}
+    subprocess.run([sys.executable, "-B", *options, str(source)],
+                   cwd=root, env=env, check=True, capture_output=True, timeout=30)
+    assert list(cache.rglob("*.pyc"))
+    assert not list(source.parent.rglob("*.pyc"))
+    images.check_public_inputs(root)
+    # Same size and timestamp must not let a child read stale precompiled code.
+    stat = source.stat()
+    source.write_text("value = 42\n")
+    os.utime(source, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    probe = "import bytecode_probe; assert bytecode_probe.value == 42"
+    subprocess.run([sys.executable, "-B", "-c", probe],
+                   cwd=source.parent, env=env, check=True, capture_output=True, timeout=30)
+    images.check_public_inputs(root)
 
 
 @pytest.mark.parametrize("fault", ["env", "history", "platform"])

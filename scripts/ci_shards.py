@@ -14,9 +14,13 @@ WEIGHTS = json.loads(WEIGHTS_PATH.read_text("utf-8"))["file_seconds"]
 SHARD_COUNT = 4
 
 
+def file_priority(name):
+    return -WEIGHTS.get(name, 2), name
+
+
 def partition(files):
     shards, loads = [set() for _ in range(SHARD_COUNT)], [0] * SHARD_COUNT
-    for name in sorted(set(files), key=lambda name: (-WEIGHTS.get(name, 2), name)):
+    for name in sorted(set(files), key=file_priority):
         index = min(range(SHARD_COUNT), key=loads.__getitem__)
         shards[index].add(name)
         loads[index] += WEIGHTS.get(name, 2)
@@ -40,7 +44,9 @@ def pytest_collection_modifyitems(config, items):
         raise pytest.UsageError("CI shard collected no tests")
     deselected = [item for item in items if names[item] not in selected_files]
     config.hook.pytest_deselected(items=deselected)
-    items[:] = selected
+    # Stable sorting keeps each module's original case/fixture order. The native
+    # loadfile scheduler must retain this order via --no-loadscope-reorder.
+    items[:] = sorted(selected, key=lambda item: file_priority(names[item]))
 
 
 def measured_weights(reports):

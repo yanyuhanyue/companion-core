@@ -86,6 +86,7 @@ jobs:
       PYTHONIOENCODING: utf-8
       HF_HUB_DISABLE_XET: '1'
       HF_HUB_DISABLE_SYMLINKS_WARNING: '1'
+      PYTHONPYCACHEPREFIX: ${{ github.workspace }}/.local/python-bytecode
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -98,6 +99,14 @@ jobs:
           cache-dependency-glob: uv.lock
           cache-suffix: python-3.12
       - run: uv sync --frozen --extra onebot
+      - name: Precompile repeated worker imports
+        if: ${{ fromJSON(needs.preflight.outputs.windows).product }}
+        run: >-
+          uv run --frozen --extra onebot --compile-bytecode python -m compileall -q
+          --invalidation-mode=checked-hash
+          companion companion_onebot_bridge companion_meme_protocol companion_meme_sources
+          companion_voice_node companion_delivery_protocol source_reader migrations
+          astrbot_plugin_companion_bridge tests scripts
       - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
         if: ${{ fromJSON(needs.preflight.outputs.windows).product }}
         with:
@@ -108,7 +117,7 @@ jobs:
         run: >-
           uv run --extra onebot python -B -m scripts.test_feedback --workers 2 --
           -p scripts.ci_shards
-          --ci-shard=${{ matrix.shard }} --durations=15
+          --ci-shard=${{ matrix.shard }} --no-loadscope-reorder --durations=15
           --basetemp=.local/test-temp --junitxml=.local/test-results/pytest.xml
       - name: Validate console assets and owner API contracts
         if: ${{ !fromJSON(needs.preflight.outputs.windows).product }}
