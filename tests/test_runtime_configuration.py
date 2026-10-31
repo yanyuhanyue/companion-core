@@ -92,6 +92,26 @@ def test_running_request_and_next_task_use_distinct_fixed_versions(hot):
     asyncio.run(scenario())
 
 
+def test_mood_provenance_remains_live_across_configuration_switch(hot):
+    from tests.test_mood import erase, feedback
+
+    source = feedback(hot)
+    job = task(hot, number=10)
+    proof = []
+    assert not labels(hot.context(job, snapshots=proof))
+    assert {item["kind"] for item in proof} >= {"runtime_configuration", "mood"}
+    save(hot, chat_time_labels=True)
+    assert runtime_config.boundary(hot.store, hot.settings, hot.clock).version == 1
+    hot._check_context_snapshots(job, proof)
+    assert not labels(hot.context(job))
+    erase(hot, [source])
+    with pytest.raises(CoreError, match="REPLY_SOURCE_RECALLED"):
+        hot._check_context_snapshots(job, proof)
+    with pytest.raises(CoreError, match="PRIVACY_CHANGED"):
+        hot.mood.revalidate(next(item["proof"] for item in proof if item["kind"] == "mood"))
+    assert runtime_config.check(hot.store, hot.settings, "job:" + job["job_id"]).version == 0
+
+
 def test_retry_after_restart_retains_original_configuration(hot):
     job = task(hot)
     save(hot, chat_time_labels=True)
