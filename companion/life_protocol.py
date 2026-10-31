@@ -88,6 +88,10 @@ class LifeDecision(StrictModel):
         default=None, exclude_if=lambda value: value is None,
     )
     defer_seconds: int | None = Field(default=None, ge=60, le=86400)
+    interest_shift: str | None = Field(
+        default=None, max_length=200,
+        description="Optional observation about changes in self-exploration interests"
+    )
 
     @model_validator(mode="after")
     def coherent(self):
