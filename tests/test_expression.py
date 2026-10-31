@@ -78,7 +78,7 @@ def test_expression_freezes_one_intent_under_existing_delivery_key(core):
     )
     assert repeated == row["message_id"]
     assert core.store.one("SELECT content_json FROM outbox")["content_json"] == row["content_json"]
-    assert "不要把表达选择当成真实情绪" in engine(core).instruction()
+    assert "表情和语气选择不是情绪记录或事实依据" in engine(core).instruction()
 
 
 @pytest.mark.parametrize(

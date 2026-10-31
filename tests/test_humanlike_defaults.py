@@ -31,6 +31,13 @@ def test_principles_lead_with_conversation_and_keep_memory_rules_separate():
     assert "needs_review" not in PRINCIPLES and "needs_review" in MEMORY_RULES
 
 
+def test_principles_keep_feelings_out_of_evidence_rules():
+    # Evidence rules govern claims about actions and content, not whether care is real enough.
+    assert "往近了说" in PRINCIPLES and "感受和在乎不需要回执或证据" in PRINCIPLES
+    assert "不制造依赖" not in PRINCIPLES and "支持主人有自己的生活" in PRINCIPLES
+    assert PRINCIPLES.index("往近了说") < PRINCIPLES.index("完成回执")
+
+
 @pytest.mark.parametrize("value", [False, None])
 def test_segmented_reply_can_be_turned_off(value):
     off = plain(segmented_reply=value)
