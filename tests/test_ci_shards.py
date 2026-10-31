@@ -34,11 +34,14 @@ def test_updated_weights_balance_slow_files_without_splitting_modules(monkeypatc
                       {"tests/test_other.py"}, {"tests/test_last.py", "tests/test_new.py"}]
 
 
-@pytest.mark.parametrize("workers", [0, 2])
+@pytest.mark.parametrize("workers", [0, 1, 2])
 def test_cli_shards_execute_every_parametrized_case_exactly_once(tmp_path, workers):
     (tmp_path / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
     (tmp_path / "conftest.py").write_text(
         "import json,os\nfrom pathlib import Path\nimport pytest\n"
+        "from scripts import ci_shards\n"
+        "ci_shards.WEIGHTS = {'test_alpha.py':40, 'test_beta.py':30, 'test_new.py':20,"
+        " 'test_fourth.py':10, 'test_fifth.py':2}\n"
         "@pytest.hookimpl(hookwrapper=True)\n"
         "def pytest_runtest_makereport(item,call):\n"
         "    report = (yield).get_result()\n"
@@ -54,8 +57,12 @@ def test_cli_shards_execute_every_parametrized_case_exactly_once(tmp_path, worke
             "    with Path(__file__).with_suffix('.events').open('a') as stream:\n"
             "        stream.write(phase + ' ' + str(os.getpid()) + '\\n')\n"
             "@pytest.fixture(scope='module',autouse=True)\n"
-            "def module_state():\n    record('setup')\n    yield\n    record('teardown')\n"
-            "@pytest.mark.parametrize('value', [1, 2])\n"
+            "def module_state():\n"
+            "    path = Path(os.environ['PHASE_REPORTS']) / (str(os.getpid()) + '.order')\n"
+            "    with path.open('a') as stream:\n"
+            "        stream.write(Path(__file__).name + '\\n')\n"
+            "    record('setup')\n    yield\n    record('teardown')\n"
+            f"@pytest.mark.parametrize('value', {[1, 2, 3] if name == 'fifth' else [1, 2]})\n"
             "def test_case(value):\n    assert value > 0\n", encoding="utf-8",
         )
     cases = []
@@ -65,13 +72,20 @@ def test_cli_shards_execute_every_parametrized_case_exactly_once(tmp_path, worke
         phases.mkdir()
         result = subprocess.run(
             [sys.executable, "-m", "pytest", "-p", "scripts.ci_shards", "--ci-shard", str(index),
-             "-q", "-n", str(workers), "--dist=loadfile",
+             "-q", "-n", str(workers), "--dist=loadfile", "--no-loadscope-reorder",
              "--basetemp=" + str(tmp_path / f"tmp-{index}"),
              "-o", "cache_dir=" + str(tmp_path / "cache"), "--junitxml=" + str(report)],
             cwd=tmp_path, env={**os.environ, "PYTHONPATH": str(ROOT), "PHASE_REPORTS": str(phases)},
             capture_output=True, text=True, encoding="utf-8", timeout=30,
         )
         assert result.returncode == 0, result.stdout + result.stderr
+        # Shard 3 contains fourth (slow, two cases) and fifth (fast, three).
+        # One real xdist worker detects both count-based scheduling and lost
+        # collection ordering, without timing assertions or scheduler mocks.
+        if index == 3 and workers in (0, 1):
+            orders = list(phases.glob("*.order"))
+            assert len(orders) == 1
+            assert orders[0].read_text().splitlines() == ["test_fourth.py", "test_fifth.py"]
         elapsed = defaultdict(dict)
         for path in phases.glob("*.jsonl"):
             for line in path.read_text().splitlines():
@@ -85,7 +99,7 @@ def test_cli_shards_execute_every_parametrized_case_exactly_once(tmp_path, worke
             assert float(case.attrib["time"]) == pytest.approx(sum(durations.values()), abs=0.001)
             cases.append((module, name))
         assert not elapsed
-    assert len(cases) == len(set(cases)) == 10
+    assert len(cases) == len(set(cases)) == 11
     for path in tmp_path.glob("*.events"):
         setup, teardown = [line.split() for line in path.read_text().splitlines()]
         assert setup[0] == "setup" and teardown == ["teardown", setup[1]]
