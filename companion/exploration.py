@@ -177,7 +177,7 @@ class ExplorationService:
     def create(self, adapter_id, operation, key, url="", step=None, source_event_ids=None,
                query=None):
         """`query` is a Core-chosen discover search term; only discover requests carry one."""
-        self.adapter(adapter_id)
+        policy = self.adapter(adapter_id)
         if query is not None and (operation != "discover" or not 2 <= len(query) <= 100):
             raise CoreError("EXPLORATION_QUERY_INVALID", 400)
         s, now = self.store, self.clock()
@@ -224,6 +224,8 @@ class ExplorationService:
             updated_at=now,
             authority_json=encode(authority),
             query=query,
+            discovery_mode=("recommend" if operation == "discover" and query is None
+                            and policy.bilibili_discovery == "recommend" else "default"),
         )
         for source_id in set(sources):
             s.insert("exploration_evidence", request_id=request_id, event_id=source_id)
@@ -381,6 +383,15 @@ class ExplorationService:
             )
             paused = s.one("SELECT value FROM runtime_meta WHERE key='life_paused'")
             for row in rows:
+                if row["discovery_mode"] == "recommend":
+                    if not reading:
+                        raise CoreError("READER_PROTOCOL_REQUIRED", 409)
+                    if policy.bilibili_discovery != "recommend":
+                        s.execute("UPDATE exploration_requests SET state='CANCELLED',"
+                                  "last_error_code='DISCOVERY_MODE_CHANGED' WHERE request_id=?",
+                                  (row["request_id"],))
+                        continue
+                    self.observations.grants.require(adapter_id, source_grant)
                 limits = {"max_bytes": cfg.exploration_max_response_bytes,
                           "max_requests": policy.reader_max_requests,
                           "max_items": min(40, cfg.exploration_daily_candidate_limit),
@@ -486,6 +497,8 @@ class ExplorationService:
                     item["source_grant"] = source_grant.snapshot()
                 if reading and row["query"] is not None:
                     item["query"] = row["query"]  # Reading v1 only; older wires never see it.
+                if row["discovery_mode"] == "recommend":
+                    item["discovery_mode"] = "recommend"
                 return item
         return None
 
@@ -506,6 +519,10 @@ class ExplorationService:
                 raise CoreError("STALE_READER_LEASE", 409)
             if row["captured_privacy_epoch"] != epoch(s):
                 raise CoreError("PRIVACY_CHANGED", 409)
+            if row["discovery_mode"] == "recommend" and (
+                self.adapter(adapter_id).bilibili_discovery != "recommend"
+            ):
+                raise CoreError("DISCOVERY_MODE_CHANGED", 409)
             self._read_scope(row, current_request=current_request)
             captured = self.observations.grants.captured(row)
             if captured != validation.source_grant:

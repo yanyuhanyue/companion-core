@@ -70,7 +70,8 @@ def test_blind_ballot_has_six_axes_and_verdicts_and_hides_arms(tmp_path, style):
     rows = [{"case": r["case"], "repetition": r["repetition"], "strategy": r["strategy"],
              "payload_sha256": r["payload_sha256"], "evidence_type": "SYNTHETIC_MODEL_RESPONSE",
              "text": "reply", "state": "SETTLED"} for r in plan["requests"]]
-    ballot = experiment.blind_export(plan, rows, tmp_path / ".local/ballot")
+    ballot = experiment.blind_export(plan, rows, tmp_path / ".local/ballot",
+                                      expression_review=True)
     assert list(ballot[0]["ratings"]) == list(experiment.STYLE_AXES)
     assert ballot[0]["overall_choices"] == ["A", "B", "TIE", "BOTH_BAD", "UNSCORABLE"]
     raw = (tmp_path / ".local/ballot/ballot.json").read_text("utf-8")
@@ -78,6 +79,10 @@ def test_blind_ballot_has_six_axes_and_verdicts_and_hides_arms(tmp_path, style):
     mapping = json.loads((tmp_path / ".local/ballot/mapping.private.json").read_text("utf-8"))
     assert {mapping[0]["A"], mapping[0]["B"]} == {"participation_v2", experiment.STYLE}
     assert {m["A"] for m in mapping} == {"participation_v2", experiment.STYLE}
+    review = json.loads((tmp_path / ".local/ballot/expression-review.json").read_text("utf-8"))
+    assert [r["pair_id"] for r in review] == [r["pair_id"] for r in ballot]
+    assert experiment.STYLE not in json.dumps(review)
+    assert all(not r["A"]["scorable"] and not r["B"]["scorable"] for r in review)
 
 
 def test_style_requires_reviewed_candidates_and_others_take_none(tmp_path, style):

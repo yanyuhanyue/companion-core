@@ -54,6 +54,18 @@ class ObservationAdapterConfig(BaseModel):
     media_analysis: bool = False
     reader_max_requests: int = Field(default=1, ge=1, le=8)
     source_grant_required: bool = False
+    bilibili_discovery: Literal["popular", "recommend"] = Field(
+        default="popular", exclude_if=lambda value: value == "popular",
+    )
+
+    @model_validator(mode="after")
+    def recommendation_requires_account(self):
+        if self.bilibili_discovery == "recommend" and (
+            self.source != "bilibili" or not self.source_grant_required
+            or self.reader_max_requests < 2
+        ):
+            raise ValueError("Bilibili recommendations require an account grant and two requests")
+        return self
 
     @model_validator(mode="before")
     @classmethod

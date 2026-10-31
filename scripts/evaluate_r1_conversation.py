@@ -385,7 +385,8 @@ def validate_plan(plan, measurement_settings=None):
     return expected
 
 
-def blind_export(plan, observations, output, seed=20261024, *, measurement_settings=None):
+def blind_export(plan, observations, output, seed=20261024, *, measurement_settings=None,
+                 expression_review=False):
     """Export every declared pair; failures stay in the denominator, never get retried."""
     expected = validate_plan(plan, measurement_settings)
     results = {}
@@ -442,6 +443,14 @@ def blind_export(plan, observations, output, seed=20261024, *, measurement_setti
     for name, value in (("ballot.json", ballot), ("mapping.private.json", mapping)):
         (output / name).write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n",
                                   encoding="utf-8")
+    if expression_review:
+        from scripts.evaluate_expression_repetition import assess
+
+        reviews = [{"pair_id": row["pair_id"], **{
+            side: assess(row["input"], row[side], scorable=row["scorable"])
+            for side in ("A", "B")}} for row in ballot]
+        (output / "expression-review.json").write_text(
+            json.dumps(reviews, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return ballot
 
 
@@ -461,6 +470,8 @@ def main():
     export_parser.add_argument("--observations", type=Path, required=True)
     export_parser.add_argument("--output", type=Path, required=True)
     export_parser.add_argument("--measurement-settings", type=Path)
+    export_parser.add_argument("--expression-review", action="store_true",
+                               help="Also export a blinded, read-only repetition review rubric")
     args = parser.parse_args()
     counting = (Settings.model_validate_json(args.measurement_settings.read_text("utf-8"))
                 if args.measurement_settings else None)
@@ -473,7 +484,8 @@ def main():
     else:
         plan = json.loads(args.plan.read_text("utf-8"))
         observations = json.loads(args.observations.read_text("utf-8"))
-        print(len(blind_export(plan, observations, args.output, measurement_settings=counting)))
+        print(len(blind_export(plan, observations, args.output, measurement_settings=counting,
+                              expression_review=args.expression_review)))
 
 
 if __name__ == "__main__":
