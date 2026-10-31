@@ -868,6 +868,9 @@ class ContentService:
         )
 
     def _policy(self, row):
+        from companion import runtime_config
+
+        runtime_config.get(self.store, self.settings, "content:" + row["item_id"])
         adapter_id = self.options.image_adapter
         if row["kind"] == "link_image":
             source = self.store.one(
@@ -1303,6 +1306,10 @@ class ContentService:
                     raise CoreError("LIVE_IMAGE_SOURCE_CHANGED", 403)
             if row["state"] != "WAITING" or not row["reserved_bytes"]:
                 raise CoreError("CONTENT_IMAGE_ALREADY_" + row["state"], 409)
+            from companion import runtime_config
+
+            runtime_config.bind(self.store, self.settings, self.clock,
+                                "content:" + row["item_id"])
             self.store.execute(
                 "UPDATE content_items SET state='FETCHING',lease_until=?,lease_token=?,"
                 "updated_at=? "
@@ -1414,6 +1421,9 @@ class ContentService:
                     (row["item_id"],),
                 )
                 return True
+            from companion import runtime_config
+
+            runtime_config.bind(s, self.settings, self.clock, "content:" + row["item_id"])
             s.execute(
                 "UPDATE content_items SET state='FETCHING',reserved_bytes=?,"
                 "lease_until=?,started_at=? "

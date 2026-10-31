@@ -6,19 +6,29 @@ import pickle
 import sys
 from pathlib import Path
 
+import pytest
+from pydantic import SecretStr
+
+from companion import operator_config, runtime_config
 from tests.conftest import run
 from tests.sdk_reader_fixture import answer, call
 from tests.test_exploration import URL
 from tests.test_reading_followup import admit, finish, lease, window
 
 
+@pytest.mark.parametrize("hot_reload", [False, True])
 def test_reader_result_resumes_one_job_without_repeating_provider_or_reader(
-    core, tmp_path, monkeypatch,
+    core, tmp_path, monkeypatch, hot_reload,
 ):
+    core.settings.operator_hot_reload = hot_reload
+    if hot_reload:
+        core.settings.control_token = SecretStr("synthetic-reader-config-" * 3)
+
     async def step(job_id, responses, state, index):
         config = tmp_path / f"reader-worker-{index}.pickle"
         output = tmp_path / f"reader-worker-{index}.json"
-        config.write_bytes(pickle.dumps((core.settings, core.clock.now, job_id,
+        settings = operator_config.load(core.settings) if hot_reload else core.settings
+        config.write_bytes(pickle.dumps((settings, core.clock.now, job_id,
                                         responses, state, str(output))))
         process = await asyncio.create_subprocess_exec(sys.executable,
             str(Path(__file__).with_name("reader_sdk_worker.py")), str(config),
@@ -46,6 +56,15 @@ def test_reader_result_resumes_one_job_without_repeating_provider_or_reader(
             job = core.store.one("SELECT * FROM jobs WHERE job_id=?", (accepted["job_id"],))
             checkpoint = core.store.one("SELECT phase,snapshots_json FROM agent_conversations")
             assert checkpoint["phase"] == "WAITING"
+            original_configuration = None
+            if hot_reload:
+                original_configuration = runtime_config.check(core.store, core.settings,
+                                                             "job:" + accepted["job_id"])
+                operator_config.update(core.store, core.settings,
+                    operator_config.ConfigurationChange(expected_version=0,
+                                                        changes={"chat_time_labels": True}),
+                    "reader-wait-config-save", core.clock())
+                assert operator_config.load(core.settings).chat_time_labels
             plan = check_bound(core.store, job, json.loads(checkpoint["snapshots_json"]),
                                epoch(core.store))
             assert len(plan["requests"]) == 1 and plan["pending"] is None
@@ -65,6 +84,11 @@ def test_reader_result_resumes_one_job_without_repeating_provider_or_reader(
             second = await step(accepted["job_id"], [answer("根据原读取回执回答。")],
                                 "SUCCEEDED", 2)
             assert len(second) == 1
+            if hot_reload:
+                assert runtime_config.check(core.store, core.settings,
+                    "job:" + accepted["job_id"]) == original_configuration
+                assert not any("当前时间参考" in str(row["content"])
+                               for row in second[0]["messages"])
             assert any(row["role"] == "tool" and row.get("tool_call_id") == "read-original"
                        for row in second[0]["messages"])
             assert await lease(client) is None

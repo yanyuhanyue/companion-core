@@ -178,9 +178,23 @@ def test_expiry_and_future_read_revocation_retain_existing_history(core, stop):
 
 
 @pytest.mark.parametrize("change", ["expiry", "read_revoke", "rotation", "forget"])
-def test_late_result_cannot_commit_after_authorization_changes(core, change):
+@pytest.mark.parametrize("hot_reload", [False, True])
+def test_late_result_cannot_commit_after_authorization_changes(core, change, hot_reload):
     snapshot = prepare(core)
+    if hot_reload:
+        from companion import operator_config, runtime_config
+
+        core.settings.operator_hot_reload = True
+        core.settings.control_token = SecretStr("synthetic-grant-config-" * 3)
+        runtime_config.boundary(core.store, core.settings, core.clock, worker="content-worker")
     item = lease(core, snapshot)
+    if hot_reload:
+        operator_config.update(core.store, core.settings,
+            operator_config.ConfigurationChange(expected_version=0,
+                                                changes={"chat_time_labels": True}),
+            "source-grant-config-save", core.clock())
+        assert runtime_config.boundary(core.store, core.settings, core.clock,
+                                       worker="content-worker").version == 1
     if change == "expiry":
         core.clock.advance(3601)
     elif change == "read_revoke":

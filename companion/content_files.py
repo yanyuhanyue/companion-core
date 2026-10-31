@@ -28,7 +28,10 @@ def _transaction(store):
 
 
 def _guard(service, config, event_id, *, upload=False, item_id=None):
-    from companion import live_text, owner_authority, owner_input, reply_revision
+    from companion import live_text, owner_authority, owner_input, reply_revision, runtime_config
+
+    if item_id is not None:
+        runtime_config.get(service.store, service.settings, "content:" + item_id)
 
     if not config.enabled:
         raise CoreError("PRIVATE_FILES_DISABLED", 403)
@@ -155,6 +158,10 @@ def claim(service, event_id, request_key, source_sha256, *, config=None):
             raise CoreError("PRIVATE_FILE_ALREADY_" + row["state"], 409)
         if row["deadline"] <= service.clock():
             raise CoreError("PRIVATE_FILE_WAIT_EXPIRED", 410)
+        from companion import runtime_config
+
+        runtime_config.bind(service.store, service.settings, service.clock,
+                            "content:" + row["item_id"])
         token = uid("content_lease")
         until = min(row["deadline"], after(service.clock(), config.upload_lease_seconds))
         service.store.execute(
@@ -391,6 +398,9 @@ async def run_file_once(service, *, config=None, parse=None):
             _failed(service, row, error.code if isinstance(error, CoreError)
                     else "PRIVATE_FILE_ORIGINAL_CHANGED")
             return True
+        from companion import runtime_config
+
+        runtime_config.bind(s, service.settings, service.clock, "content:" + row["item_id"])
         token = uid("content_lease")
         s.execute("UPDATE content_items SET state='RUNNING',lease_token=?,lease_until=?,"
                   "updated_at=? WHERE item_id=?", (token, min(row["deadline"],

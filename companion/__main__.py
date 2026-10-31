@@ -13,7 +13,7 @@ import httpx
 import uvicorn
 from pydantic import ValidationError
 
-from companion import shutdown
+from companion import runtime_config, shutdown
 from companion.backup import backup, restore
 from companion.config import Settings
 from companion.contracts import CoreError
@@ -32,12 +32,14 @@ async def worker(settings):
     async with httpx.AsyncClient(timeout=settings.timeout_seconds, trust_env=False) as client:
         core = Core(settings, ModelClient(settings, client))
         worker_id = uid("worker")
+        core.store.configuration_worker = "worker"
         loop = Recorder(core.store)
         try:
             maintenance_clock = Maintenance()
             with Wakeup(core.store, settings, "worker", core.clock) as wake:
                 # A stop request is honoured only here, between units.
                 while not shutdown.requested():
+                    runtime_config.boundary(core.store, settings, core.clock)
                     scan = wake.before_scan()
                     result = await run_native_unit(core.run_once, worker_id)
                     maintenance = not result.progressed and maintenance_clock.due()

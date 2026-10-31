@@ -24,6 +24,7 @@ from companion import (
     qq_rich,
     reply_quote,
     reply_revision,
+    runtime_config,
     time_context,
     turn_taking,
     watch_ledger,
@@ -432,6 +433,12 @@ class Core(Runtime):
                 if self.content.status(row["event_id"])["pending"]:
                     return None
             token = uid("lease")
+            try:
+                runtime_config.bind(s, self.settings, self.clock, "job:" + row["job_id"])
+            except CoreError as error:
+                s.execute("UPDATE jobs SET state='FAILED',last_error_code=?,updated_at=? "
+                          "WHERE job_id=?", (error.code, now, row["job_id"]))
+                return None
             s.execute(
                 "UPDATE jobs SET state='RUNNING',lease_owner=?,lease_token=?,lease_until=?,"
                 "attempts=attempts+1,updated_at=? WHERE job_id=?",
@@ -510,6 +517,11 @@ class Core(Runtime):
     def _check_context_snapshots(self, job, snapshots, *, current_request=None):
         reply_revision.check_job(self.store, job)
         authority = self._owner_job_view(job)
+        configuration = runtime_config.check(self.store, self.settings, "job:" + job["job_id"])
+        markers = [item for item in snapshots if item["kind"] == "runtime_configuration"]
+        if markers and (configuration is None or markers != [{"kind": "runtime_configuration",
+                "snapshot_id": runtime_config.identity(self.settings, configuration)}]):
+            raise CoreError("CONFIGURATION_CONTEXT_CHANGED", 409)
         self.memes.check_offer(job)
         if private_life.strict(self.store, self.settings):
             live_text.check_job(self.store, self.settings, self.clock, job,
@@ -709,7 +721,8 @@ class Core(Runtime):
 
     def context(self, job, memories=None, memory_paused=False, *, snapshots=None, model_tools=(),
                 planning=False):
-        s, cfg = self.store, self.settings
+        s = self.store
+        cfg = runtime_config.for_context(s, self.settings, job, snapshots)
         mark = splits(job.get("trace_id"))
         reply_revision.check_job(s, job)
         authority = self._owner_job_view(job)

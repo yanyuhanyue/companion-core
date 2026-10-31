@@ -171,6 +171,7 @@ def create_app(settings=None, *, memory_control_grant=None, memory_control_sha25
                 if image_model else nullcontext()
             ) as client:
                 app.state.core = Core(settings, ModelClient(settings, client) if client else None)
+                app.state.core.store.configuration_worker = "api"
                 try:
                     yield
                 finally:

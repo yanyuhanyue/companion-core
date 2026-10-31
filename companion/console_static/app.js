@@ -4,8 +4,8 @@
  * 接口返回的通用记录（console_read.entry）。
  * @typedef {{ id: string|number, kind: string, title: string, status: string, occurred_at: string|null, summary: string, detail: Record<string, any> }} ConsoleItem
  * @typedef {{ items: ConsoleItem[], next_cursor: string|number|null, observed_at: string, meta?: Record<string, any> }} Collection
- * @typedef {{ key: string, label: string, group?: string, type: string, value: any, active_value?: any, nullable?: boolean, configured?: boolean, description?: string, minimum?: number, maximum?: number, schema?: Record<string, any> }} ConfigField
- * @typedef {{ version: number, active_version: number, pending_restart: boolean, fields: ConfigField[], history: Array<{version: number, created_at: string, fields: string[]}>, cloud_budget?: any }} Configuration
+ * @typedef {{ key: string, label: string, group?: string, type: string, value: any, active_value?: any, active_source?: string, effect?: string, nullable?: boolean, configured?: boolean, description?: string, minimum?: number, maximum?: number, schema?: Record<string, any> }} ConfigField
+ * @typedef {{ version: number, active_version: number, startup_version?: number, pending_restart: boolean, pending_reload?: boolean, requires_reapproval?: boolean, approval_reason?: string, hot_reload_enabled?: boolean, error?: string, workers?: Array<{worker: string, active_version: number, pending_version: number|null, reason: string|null, observed_at: string}>, fields: ConfigField[], history: Array<{version: number, created_at: string, fields: string[]}>, cloud_budget?: any }} Configuration
  * @typedef {{ cls?: string, symbol?: string, type?: "button"|"submit", disabled?: boolean, label?: string }} ButtonOptions
  * @typedef {{ method?: string, body?: any, signal?: AbortSignal, authenticate?: boolean, validate?: (value: any) => boolean }} RequestOptions
  */
@@ -1363,7 +1363,8 @@ function fieldRow(f, label, only) {
   const active = f.active_value !== undefined && !same(f.value, f.active_value) && f.type !== "secret";
   return el("div", { class: "pf" + (wide ? " wide" : "") + (changed ? " changed" : ""), id: "pf-" + f.key },
     el("div", { class: "pf-l" }, el("b", {}, label || f.label), f.description ? el("span", {}, f.description) : null,
-      active ? el("span", { class: "pf-active" }, "当前生效：" + fmtField(f, f.active_value)) : null),
+      el("span", {}, f.effect === "task_boundary" ? "下一任务边界生效" : f.effect === "restart_and_reapproval" ? "需要重启并核对审批" : "需要重启"),
+      active ? el("span", { class: "pf-active" }, (f.active_source === "worker" ? "聊天 Worker 新任务值：" : "API 启动值：") + fmtField(f, f.active_value)) : null),
     el("div", { class: "pf-c" }, control(f, only), f.nullable && f.type !== "secret" && !NULL_DEFAULTS[f.key] && draftVal(f) !== null ? btn("设为未配置", () => setDraft(f, null), { cls: "sm quiet" }) : null),
     el("p", { class: "pf-err", role: "alert", hidden: true }));
 }
@@ -1374,7 +1375,7 @@ function currencySwitch() {
 function saveBar() {
   if (!state.draft.size || !DRAFT_ROUTES.includes(state.route) || !state.data?.configuration) return null;
   const c = state.data.configuration, next = c.version + 1;
-  return el("div", { class: "savebar" }, el("p", {}, el("b", { class: "num" }, String(state.draft.size)), ` 项修改没保存。保存后成为 v${next}，重启后生效。`),
+  return el("div", { class: "savebar" }, el("p", {}, el("b", { class: "num" }, String(state.draft.size)), ` 项修改没保存。保存后成为 v${next}，生效方式见各字段说明。`),
     btn("放弃修改", () => { state.draft.clear(); rerender(); }, { cls: "quiet" }), btn("查看修改", reviewDrawer, { cls: "quiet" }),
     btn("保存为 v" + next, saveDraft, { cls: "primary" }));
 }
@@ -1398,7 +1399,10 @@ function saveDraft() {
   const c = state.data.configuration, changes = Object.create(null);
   for (const [k, v] of state.draft) { const f = fieldOf(k); if (f && !(f.type === "secret" && v === "")) changes[k] = v; }
   if (!Object.keys(changes).length) { toast("没有需要保存的修改"); return; }
-  const form = el("form", { class: "dlg-form" }, el("p", { class: "muted" }, `保存后成为待生效版本。运行中的请求继续使用 v${c.active_version}，按停止、备份、重启的顺序操作后才会生效。`), diffList(false));
+  const hot = c.hot_reload_enabled && Object.keys(changes).every(k => fieldOf(k)?.effect === "task_boundary");
+  const form = el("form", { class: "dlg-form" }, el("p", { class: "muted" }, hot
+    ? "保存后等待 Worker 在下一任务边界校验。运行中及等待恢复的任务继续使用各自的原版本。"
+    : "此版本包含需要重启的设置，整版等待重启；涉及费用或能力策略时还需核对原审批。"), diffList(false));
   const submit = el("button", { type: "submit", class: "btn primary" }, "保存 " + Object.keys(changes).length + " 项修改");
   form.append(el("div", { class: "dlg-acts" }, submit));
   form.addEventListener("submit", e => {
@@ -1410,7 +1414,7 @@ function saveDraft() {
       const budget = state.data.configuration.cloud_budget;
       state.data.configuration = { ...r, cloud_budget: r.cloud_budget || budget };
       for (const k of Object.keys(changes)) state.draft.delete(k);
-      closeDialog(); closeDrawer(); rerender(); toast(`已保存为 v${r.version}，重启后生效`);
+      closeDialog(); closeDrawer(); rerender(); toast(`已保存为 v${r.version}，${configurationStatus(r)}`);
     }).finally(() => { state.configSave = null; });
   });
   openDialog("保存为 v" + (c.version + 1), form);
@@ -1633,7 +1637,7 @@ PAGES.configuration = data => {
   const q = state.cfgQ.trim(), fields = cfgFields();
   const search = searchBox("cfg-q", state.cfgQ, "搜索设置，例如 冷却、上限、时间", v => { state.cfgQ = v; rerender(); });
   search.classList.add("wide-search");
-  const top = [head("配置", "修改会先攒在一起，核对后保存为加密的新版本；运行中的请求继续使用旧配置，重启后生效。", currencySwitch()), el("div", { class: "toolbar" }, search)];
+  const top = [head("配置", "保存为加密的新版本；允许热加载的整版设置在下一任务边界校验，已有任务保持原版本。", currencySwitch()), el("div", { class: "toolbar" }, search)];
   if (q) {
     const hits = fields.filter(f => (f.label + (f.description || "") + f.key).includes(q));
     return el("div", {}, top, sheet(`“${q}”的搜索结果`, hits.length ? el("div", { class: "pf-list" }, hits.map(f => CAP_KEYS.has(f.key)
@@ -1664,16 +1668,49 @@ PAGES.configuration.after = () => {
 };
 function versionSection(c) {
   const hist = [...(c.history || [])].filter(h => Number.isInteger(h.version)).sort((a, b) => a.version - b.version).slice(-6);
-  const label = v => v === c.active_version ? ["active", "生效中"] : v > c.active_version ? ["pending", "待生效"] : ["old", "历史"];
+  const label = v => v === c.active_version ? ["active", "聊天新任务生效版本"] : v === c.version ? ["pending", "已保存"] : ["old", "历史"];
   return el("section", { class: "sheet cfg-sec", id: "cfg-version" }, el("div", { class: "sheet-head" }, el("h2", {}, "版本")), el("div", { class: "sheet-body" },
     el("ol", { class: "vchain" }, hist.map(h => { const [cls, text] = label(h.version);
-      return el("li", { class: cls }, el("button", { type: "button", onclick: () => drawer("v" + h.version + " 的修改", fmtDate(h.created_at),
-        el("ul", { class: "diff" }, (h.fields || []).map(k => el("li", {}, el("b", {}, fieldOf(k)?.label || "已移除的设置"))))) },
+      return el("li", { class: cls }, el("button", { type: "button", onclick: () => {
+        const detail = el("div", {}, el("ul", { class: "diff" }, (h.fields || []).map(k => el("li", {}, el("b", {}, fieldOf(k)?.label || "已移除的设置")))),
+          btn("重新选择此版本", () => restoreConfiguration(h.version)));
+        drawer("v" + h.version + " 的修改", fmtDate(h.created_at), detail);
+      } },
         el("b", { class: "num" }, "v" + h.version), el("span", {}, text), el("small", {}, fmtDate(h.created_at) + "，" + (h.fields || []).length + " 项修改"))); }),
       !hist.length ? el("li", { class: "active" }, el("span", {}, el("b", { class: "num" }, "v" + c.active_version), el("span", {}, "生效中"), el("small", {}, "还没有通过控制台保存过修改"))) : null,
       !c.pending_restart ? el("li", { class: "next" }, el("span", {}, el("b", { class: "num" }, "v" + (c.version + 1)), el("span", {}, state.draft.size ? state.draft.size + " 项修改未保存" : "暂无修改"))) : null),
-    c.pending_restart ? el("div", { class: "apply" }, el("div", {}, el("h3", {}, `v${c.version} 已保存，还没有生效`), el("p", { class: "note" }, "按下面的顺序在服务器上操作，完成重启后这里会显示为生效中。"),
+    el("div", { class: "apply" }, el("div", {}, el("h3", {}, `v${c.version} 已保存 · ${configurationStatus(c)}`),
+      el("p", { class: "note" }, c.hot_reload_enabled ? "新任务使用 Worker 各自报告的默认版本；运行中、重试和工具等待恢复的任务保持原版本。" : "热加载已关闭，使用进程启动时读取的配置。"),
+      c.error ? el("p", { role: "alert" }, c.error) : null,
+      c.approval_reason ? el("p", { role: "alert" }, c.approval_reason) : null,
+      !(c.workers || []).length ? el("p", {}, "尚无 Worker 生效报告；API 启动版本 v" + (c.startup_version ?? c.active_version)) :
+        el("ul", {}, c.workers.map(w => el("li", {}, `${w.worker}：新任务 v${w.active_version}；${w.pending_version == null ? "已生效" : "等待 v" + w.pending_version}${w.reason ? "；" + w.reason : ""}；报告于 ${fmtDate(w.observed_at)}`))))),
+    btn("重新选择启动基础配置", () => restoreConfiguration(0), { cls: "sm quiet" }),
+    c.pending_restart ? el("div", { class: "apply" }, el("div", {}, el("h3", {}, c.requires_reapproval ? "需要重启并重新审批" : "需要重启"), el("p", { class: "note" }, "保存不会扩展原有授权；完成原发布与审批流程后再启用任务。"),
       el("ol", { class: "steps" }, el("li", {}, "停止聊天、日记、内容和生活进程"), el("li", {}, "做一次加密备份"), el("li", {}, "如果在 QQ 私人窗口期内，先完成窗口交接"), el("li", {}, "重启 API 和各个进程")))) : null));
+}
+function configurationStatus(c) {
+  if (c.error) return "校验失败，保留上一有效版本";
+  if (c.requires_reapproval) return c.pending_restart ? "需要重新审批与重启" : "需要重新审批";
+  if (c.pending_restart) return "需要重启";
+  if (c.pending_reload) return "等待任务边界";
+  if (!(c.workers || []).length) return "启动配置，等待 Worker 报告";
+  return "已生效（新任务）";
+}
+function restoreConfiguration(version) {
+  const c = state.data.configuration;
+  const form = el("form", { class: "dlg-form" }, el("p", {}, `将 v${version} 的设置重新校验并保存为 v${c.version + 1}。现有任务继续使用原版本；当前授权、来源和费用审批仍需满足。`));
+  const submit = el("button", { type: "submit", class: "btn primary" }, "重新选择并保存");
+  form.append(submit);
+  form.addEventListener("submit", e => {
+    e.preventDefault();
+    perform(form, submit, () => api.write("/configuration", { expected_version: c.version, restore_version: version }, "PUT",
+      r => Number.isInteger(r.version) && Array.isArray(r.fields)), r => {
+      state.data.configuration = r; state.draft.clear(); closeDialog(); closeDrawer(); rerender();
+      toast(`已保存为 v${r.version}，${configurationStatus(r)}`);
+    });
+  });
+  openDialog("重新选择配置版本", form);
 }
 function modelSection(other) {
   const rate = k => fieldOf(k), rates = RATE_KEYS.map(rate).filter(Boolean);

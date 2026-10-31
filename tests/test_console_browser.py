@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from pydantic import SecretStr
 
-from companion import delegation
+from companion import delegation, operator_config, runtime_config
 from tests.conftest import run
 from tests.console_proxy import ROOT, console_proxy
 from tests.test_cognition_goal_steps import finish_record, retained_plan
@@ -111,6 +111,66 @@ async def submit_dialog(page, label, path):
     assert result.status == 200, await result.text()
     await page.get_by_role("dialog").wait_for(state="hidden")
     await page.locator("#page[aria-busy=false]").wait_for()
+
+
+def test_console_runtime_versions_show_boundary_restart_review_and_restore(core, tmp_path):
+    core.settings.operator_hot_reload = True
+    core.store.configuration_worker = "worker"
+    core.clock.now = datetime.now(UTC)
+    evidence = ROOT / "output/playwright/runtime-configuration"
+    evidence.mkdir(parents=True, exist_ok=True)
+
+    def save(version, **changes):
+        operator_config.update(core.store, core.settings,
+            operator_config.ConfigurationChange(expected_version=version, changes=changes),
+            f"browser-config-{version}", core.clock())
+
+    async def scenario():
+        async with console_page(core, tmp_path) as page:
+            runtime_config.boundary(core.store, core.settings, core.clock)
+            await navigate(page, "配置")
+            await page.get_by_role("switch", name="对话里标注时间", exact=True).click()
+            await page.get_by_role("button", name="保存为 v1", exact=True).click()
+            async with page.expect_response(lambda r: r.url.endswith("/configuration")
+                and r.request.method == "PUT") as response:
+                await page.get_by_role("dialog").get_by_role(
+                    "button", name="保存 1 项修改", exact=True).click()
+            saved = await response.value
+            assert saved.status == 200, await saved.text()
+            await page.get_by_role("heading", name="v1 已保存 · 等待任务边界",
+                                   exact=True).wait_for()
+            await page.screenshot(path=str(evidence / "pending.png"))
+            runtime_config.boundary(core.store, core.settings, core.clock)
+            await page.get_by_role("button", name="刷新当前页面").click()
+            await page.get_by_role("heading", name="v1 已保存 · 已生效（新任务）",
+                                   exact=True).wait_for()
+            await page.screenshot(path=str(evidence / "active.png"))
+            save(1, timeout_seconds=60)
+            await page.get_by_role("button", name="刷新当前页面").click()
+            await page.get_by_role("heading", name="v2 已保存 · 需要重启", exact=True).wait_for()
+            save(2, max_output_tokens=1024)
+            await page.get_by_role("button", name="刷新当前页面").click()
+            await page.get_by_role("heading", name="v3 已保存 · 需要重新审批与重启",
+                                   exact=True).wait_for()
+            await page.screenshot(path=str(evidence / "reapproval.png"))
+            await page.locator(".vchain button").filter(has_text="v1").click()
+            await page.get_by_role("button", name="重新选择此版本", exact=True).click()
+            async with page.expect_response(lambda r: r.url.endswith("/configuration")
+                and r.request.method == "PUT") as response:
+                await page.get_by_role("dialog").get_by_role(
+                    "button", name="重新选择并保存", exact=True).click()
+            restored = await response.value
+            assert restored.status == 200, await restored.text()
+            assert (await restored.json())["version"] == 4
+            await page.get_by_role("heading", name="v4 已保存 · 等待任务边界",
+                                   exact=True).wait_for()
+            runtime_config.boundary(core.store, core.settings, core.clock)
+            await page.get_by_role("button", name="刷新当前页面").click()
+            await page.get_by_role("heading", name="v4 已保存 · 已生效（新任务）",
+                                   exact=True).wait_for()
+            await page.screenshot(path=str(evidence / "restored.png"))
+
+    run(scenario())
 
 
 def test_console_goal_buttons_submit_original_plan_ids_and_current_version(core, tmp_path):

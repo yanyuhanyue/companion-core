@@ -116,7 +116,96 @@ CI workflow 和通用发布脚本由 CI 负责人接入，本片不修改其队�
 
 登录密码来自已有 `COMPANION_CONTROL_TOKEN`。浏览器使用 Secure、HttpOnly、SameSite cookie；写入同时要求精确 Origin、CSRF 与幂等键。传输令牌不能代替主人会话。密码错误限流和会话数量／期限由服务端执行，退出后清除界面上的私人内容。
 
-一般配置保存为加密的待生效版本，返回保存版本、当前生效版本和字段修改记录。运行中的请求继续使用原配置；按现有停止、备份、窗口交接、重启流程应用新版本。密钥只写，空白界面不等于没有配置；返回的 `null` 保留原密钥，明确写入空字符串才清空。配置密文由主人控制令牌派生密钥保护，备份与恢复必须同时保管原令牌；直接更换令牌不能解密旧版本。
+一般配置保存为加密的新版本，返回保存版本、等待生效版本和各 Worker 最近报告的生效版本。
+首批只有 `chat_time_labels` 允许在下一任务边界热加载；其他设置继续按既有停止、备份、
+窗口交接、重启和审批流程应用。密钥只写，空白界面不等于没有配置；返回的 `null` 保留
+原密钥，明确写入空字符串才清空。配置密文由主人控制令牌派生密钥保护，备份与恢复必须
+同时保管原令牌；直接更换令牌不能解密旧版本。
+
+### 安全配置热加载
+
+2026-10-31 检查的实际读取路径：
+
+| 位置 | 读取与生效边界 |
+| --- | --- |
+| `Settings.load` / `operator_config.load` | 启动时读取 TOML、环境变量及完整的已保存覆盖版本 |
+| `console_api` | 保留启动时的认证、Origin、会话和存储配置；写操作仍在独立 API Store 内重新校验主人会话 |
+| 聊天 Worker / `Core.claim_job` | 原生领取事务内首次绑定配置；上下文读取该绑定，不修改共享 Settings |
+| Life Worker | 每次原生 selector step 前检查版本；调用 Core 的聊天/主动任务沿用同一绑定，模型任务在既有 reserve 内绑定 |
+| Content Worker | 每批处理前检查版本；上传领取、文件解析和内容处理保留各自任务身份，原有来源和隐私复验继续执行 |
+| Executive Worker | 每次原生执行单元前检查版本；工具领取时绑定，执行和回执提交重新核对 |
+| `budget.reserve` / 最终 HTTP 边界 | 请求绑定到任务原快照，发送前重新核对请求、任务和启动配置身份 |
+| `worker_loop.py` | 仍只表示已完成的循环观测，不是配置生效、任务成功或心跳证据 |
+
+`operator_hot_reload = true` 默认启用；部署配置或 `COMPANION_OPERATOR_HOT_RELOAD=false`
+可关闭。该开关属于部署保管，不能从浏览器修改。关闭时新任务使用启动配置，重启仍通过
+原入口读取完整保存版本；已有绑定任务继续使用自己的原版本，不能通过关闭开关改写它。
+
+白名单以外一律保守处理。`chat_time_labels` 只改变已获准聊天上下文内的时间表达，
+不增加来源范围或投递动作；上下文仍经过原来的大小限制和实际请求费用预留。
+切换时同时比较所有非白名单实际值、Paid Budget 合同和具体能力哈希。
+表情概率、冷却和分类属于 `meme_service.policy_hash`；Thinking、Token 上限、模型路由、
+分段发送、权限、存储和保留期均不进入本批白名单。展示为“需要重新审批”是对原审批流程
+的提示，配置 API 不签发或扩展授权。
+
+一个保存版本只要含有非白名单的实际差异，整版等待重启/审批，不能先应用其中的安全叶子。
+累计保存也按完整候选与当前启动配置比较，不能用第二次只改安全字段掩盖前一次的费用变更。
+无效密文、校验失败、依赖或授权未就绪、版本冲突均保留上次有效默认快照，返回具体错误码。
+启动时若最新保存版本损坏，启用热加载的进程可以读取之前仍可解密且通过校验的完整版本；
+历史均不可读时，只能恢复最近一次聊天 Worker 报告且 HMAC 与当前部署完整启动身份
+匹配的有效快照；无法重新验证时拒绝启动。关闭热加载保持原启动错误行为。
+
+新增迁移 `0055_runtime_configuration` 仍由正式 `python -m companion init` / 发布流程执行：
+
+- `operator_runtime_snapshots` 保存版本、启动配置的私有 HMAC 指纹和不可变的安全叶子值。
+  明文表不复制凭据、来源正文或授权材料；完整实际值只参与指纹，配置覆盖仍按原机制加密。
+- `operator_task_configuration` 将原生任务/模型请求标识绑定到快照，用主人控制凭据派生的
+  HMAC 校验身份。上下文证据带同一快照标识；请求准入、最终传输、来源复验和结果提交
+  使用同一身份，且仍实时核对 OwnerAuthority、Source Grant、隐私版本和原生租约。
+- 每个 Worker 在既有 `runtime_meta` 中报告默认版本、待生效版本、错误码和报告时间。
+  无状态变化时不写入，避免多个 Worker 因互相观测写入而反复唤醒。报告是最近观测，
+  不代表进程仍在线，也不代表所有旧任务已经完成。
+
+快照是只含标量的冻结 Pydantic 模型。所有服务与 ModelClient 继续保有原启动 Settings、
+连接和索引；只有生成聊天上下文时按任务快照读取安全叶子。原生 Worker 无须同时切换。
+已运行、重试、SDK 工具等待和重启恢复的同一任务始终保留第一次绑定，不能在下一模型
+step 偷换配置。启动配置的非热字段/部署默认值或凭据变化，无法重新验证原身份时拒绝
+恢复该任务；已有账本、预留、UNKNOWN 和消息投递责任继续由原机制处理。
+升级前已经发起模型请求而没有配置绑定的任务不能补造身份；需按原恢复/发布流程处置。
+已经准备好的旧消息仍保留原来源证明和投递责任。
+
+控制台 `version` 表示已保存，`active_version` 是聊天 Worker 最近报告的新任务默认版本
+（无报告时兼容返回 API 启动版本，同时明确显示“尚无 Worker 生效报告”）；`startup_version`
+单独给出 API 启动值。`workers` 分别报告各进程，`pending_version` / `pending_reload` 表示
+等待任务边界，`pending_restart` / `requires_reapproval` 区分重启和审批要求，`error` 和
+各 Worker 的 `reason` 显示失败原因。字段同时标明生效方式和生效值的来源，不能把保存
+成功或一个 Worker 的切换当作所有任务已切换。
+
+历史版本通过同一个配置 PUT 和原主人会话、Origin、CSRF、幂等及乐观版本检查重新选择：
+
+```json
+{"expected_version": 12, "restore_version": 7}
+```
+
+`restore_version: 0` 选择当前部署的原始启动基础配置。重新选择会在当前部署基础上重新校验
+历史覆盖，生成新的递增保存版本；不移动历史版本号、不恢复旧权限或旧费用额度授权，
+也不改写任务已有绑定。它与 `changes` 互斥。密钥目的地址校验保持不变。
+
+实现复用原有加密配置、SQLite 领取事务、任务/请求标识、SDK Conversation 快照和
+OwnerAuthority / Paid Budget / Source Grant 检查。研究参考：DSH 的
+[原生任务边界与请求冻结实现](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/core/agent-loop/src/agent.ts)
+（本次检查 Git blob `c4daa50c47c13fb86b94466774dfcac32b214076`）在进入 step 前固定模型选择和
+工具集、记录 request header 并冻结请求；其
+[上下文投影](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/core/agent-loop/src/runtime-context.ts)
+保留可恢复的上下文身份。本项目继续使用整个原生任务作为更保守的配置边界，未引入第二套
+调度器、文件监听配置源或外部 DSH 执行。
+
+验证入口为 `scripts/check.ps1 -TestFiles`，相关用例包含 `test_runtime_configuration`、
+`test_runtime_configuration_process`、`test_sdk_reader_process`、`test_source_grants` 和
+迁移/既有控制台与 Worker 检查。进程用例从真实 HTTP 控制台保存配置，并运行独立进程内
+的原生 `companion.__main__.worker`，只替换合成时钟和外部 provider 传输；覆盖请求中修改、
+下一任务、费用合同变化、撤权和隐私变化。SDK Reader 用例在工具等待期间保存新版本，
+以启动时已读取新配置的独立进程恢复原任务，检查原配置身份及模型/Reader 不重放。
 
 通过控制台修改聊天或图片服务 URL 时，必须使用 HTTPS。若目的地址改变且已有密钥，
 必须在同一次修改中明确提供新目的地凭据（或明确清空）；`null` 不能把旧密钥静默带到新地址，
