@@ -130,7 +130,7 @@ def validate(snapshots, job, current_epoch):
             raise ValueError
         if plan["version"] not in {1, 2}:
             return None
-        if set(plan) != {
+        if set(plan) != ({
             "version",
             "job_id",
             "privacy_epoch",
@@ -143,8 +143,24 @@ def validate(snapshots, job, current_epoch):
             "groups",
             "requests",
             "pending",
-        }:
+        } | ({"assembly_dropped"} if plan["version"] == 2 else set())):
             raise ValueError
+        if plan["version"] == 2:
+            if (not isinstance(plan["assembly_dropped"], list)
+                or len(plan["assembly_dropped"]) > MAX_GROUPS):
+                raise ValueError
+            indices = []
+            for item in plan["assembly_dropped"]:
+                if (not isinstance(item, dict)
+                    or set(item) != {"index", "kind", "priority", "reason"}
+                    or not _integer(item["index"], MAX_GROUPS - 1)
+                    or item["kind"] not in {"reference", "history"}
+                    or not _integer(item["priority"], TOPIC)
+                    or item["reason"] not in REASONS):
+                    raise ValueError
+                indices.append(item["index"])
+            if len(set(indices)) != len(indices):
+                raise ValueError
         proofs = _proofs(snapshots)
         count = plan["initial_source_proof_count"]
         if (
@@ -239,7 +255,7 @@ def check_bound(store, job, snapshots, current_epoch):
     return plan
 
 
-def initialize(core, job, messages, blocks, snapshots):
+def initialize(core, job, messages, blocks, snapshots, *, assembly_dropped=()):
     """Called by the trusted Core assembler after attachments and original source pinning."""
     if any(item["kind"] == "context_plan" for item in snapshots):
         raise CoreError("CONTEXT_PLAN_INVALID", 409)
@@ -271,6 +287,7 @@ def initialize(core, job, messages, blocks, snapshots):
     proofs = _proofs(snapshots)
     plan = {
         "version": 2,
+        "assembly_dropped": deepcopy(list(assembly_dropped)),
         "job_id": job["job_id"],
         "privacy_epoch": epoch(core.store),
         "authority_sha256": sha(json.loads(job["authority_json"])),

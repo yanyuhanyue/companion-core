@@ -119,6 +119,7 @@ def _native_context(view, job_id, current_epoch):
                     "selected_group_count": len(record["selected"]),
                     "dropped": record["dropped"]}
         return {**result, "state": "RECORDED", "privacy_epoch": plan["privacy_epoch"],
+                "assembly_dropped": plan.get("assembly_dropped", []),
                 "plan_sha256": sha(plan), "payload_sha256": (
                     plan["requests"][-1]["payload_sha256"] if plan["requests"] else None),
                 "groups": dict(Counter(group["kind"] for group in plan["groups"])),

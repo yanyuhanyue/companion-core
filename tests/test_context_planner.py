@@ -260,7 +260,7 @@ def test_required_overflow_refuses_before_reserve_and_retry_keeps_checkpoint(cor
 
 
 @pytest.mark.parametrize("damage", [
-    "job", "epoch", "group", "priority", "proof", "wire", "duplicate"])
+    "job", "epoch", "group", "priority", "assembly", "proof", "wire", "duplicate"])
 def test_recognized_damaged_plan_never_reaches_paid_io(core, tmp_path, damage):
     _, job = chat(core, tmp_path)
     messages, snapshots = initial(core, job)
@@ -273,6 +273,9 @@ def test_recognized_damaged_plan_never_reaches_paid_io(core, tmp_path, damage):
         plan["groups"][1]["wire_count"] = True
     elif damage == "priority":
         plan["groups"][1]["priority"] = True
+    elif damage == "assembly":
+        plan["assembly_dropped"] = [{"index": 0, "kind": "history",
+                                     "priority": True, "reason": "SOFT_LIMIT"}]
     elif damage == "proof":
         plan["initial_source_proofs_sha256"] = "f" * 64
     elif damage == "wire":

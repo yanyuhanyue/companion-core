@@ -114,7 +114,7 @@ def test_native_context_selection_keeps_evidence_origin_and_recent_dialogue(core
             )["snapshots_json"])
             plan = next(p["metadata"]["core_context"] for p in frozen
                         if p["kind"] == "context_plan")
-            dropped = plan["requests"][-1]["dropped"]
+            dropped = [*plan["assembly_dropped"], *plan["requests"][-1]["dropped"]]
             assert any(item["priority"] == 0 for item in dropped)
             assert any(item["kind"] == "history" for item in dropped)
             assert (await entry.send(entry.client, entry.protocol))["worked"]

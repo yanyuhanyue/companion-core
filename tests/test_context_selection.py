@@ -173,6 +173,7 @@ def test_assembly_and_sdk_share_order_and_v1_remains_readable(core, tmp_path):
     legacy = deepcopy(legacy)
     plan = legacy[-1]["metadata"]["core_context"]
     plan["version"] = 1
+    plan.pop("assembly_dropped")
     for group in plan["groups"]:
         group.pop("priority")
     core.settings.context_soft_tokens = 1

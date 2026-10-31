@@ -1143,7 +1143,8 @@ class Core(Runtime):
                        else context_selection.OLD_HISTORY)
                       for index, (source, turn) in enumerate(zip(sources, turns, strict=True)))
         blocks.append(("current", current_input, True, context_selection.TOPIC))
-        if protected or planning:
+        assembly_dropped = []
+        if protected:
             # History is capped before review. Do not silently discard reviewed
             # conflict evidence or selected facts here; full paid admission still applies.
             messages = [rules, *references, *(m for turn in turns for m in turn), *current_input]
@@ -1152,6 +1153,7 @@ class Core(Runtime):
                 rules, references, turns, current_input, cfg.context_soft_tokens,
                 settings=cfg, scenario=job["kind"],
                 blocks=blocks,
+                dropped=assembly_dropped,
             )
         if authority and job["kind"] == "chat":
             from companion import agent_images
@@ -1204,7 +1206,8 @@ class Core(Runtime):
                 selected_blocks = [(kind, block, required, priority)
                     for kind, block, required, priority in blocks
                     if any(message is block[0] for message in messages)]
-                initialize(self, job, messages, selected_blocks, snapshots)
+                initialize(self, job, messages, selected_blocks, snapshots,
+                           assembly_dropped=assembly_dropped)
         mark("context_planning")
         return messages
 

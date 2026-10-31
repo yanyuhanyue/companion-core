@@ -178,7 +178,7 @@ def recent_context_sources(store, conversation_id, current_event_id, max_turns, 
 
 
 def fit_context(rules, references, turns, current_input, soft_limit, *, settings=None,
-                scenario="chat", blocks=None):
+                scenario="chat", blocks=None, dropped=None):
     """Apply the same trusted priority order as final request planning.
 
     Current input also includes its bounded shared-content reference, when present.
@@ -194,23 +194,27 @@ def fit_context(rules, references, turns, current_input, soft_limit, *, settings
     groups, offset = [], 0
     for kind, block, required, priority in blocks:
         groups.append({"wire_start": offset, "priority": priority,
+                       "index": len(groups),
                        "required": required or any(isinstance(m["content"], list) for m in block),
                        "block": block, "kind": kind})
         offset += len(block)
     messages = [message for group in groups for message in group["block"]]
-    def count():
+    def reason():
         if settings is None:
-            return token_upper_bound(messages)
+            return "SOFT_LIMIT" if token_upper_bound(messages) > soft_limit else None
         from companion.context_planner import pressure
         from companion.token_measurement import measure_request
 
         measured = measure_request(settings, messages, scenario)
-        return soft_limit + 1 if pressure(settings, measured, soft_limit=soft_limit,
-                                         scenario=scenario) else 0
+        return pressure(settings, measured, soft_limit=soft_limit, scenario=scenario)
 
     for group in drop_order(groups):
-        if count() <= soft_limit:
+        cause = reason()
+        if cause is None:
             break
+        if dropped is not None:
+            dropped.append({"index": group["index"], "kind": group["kind"],
+                            "priority": group["priority"], "reason": cause})
         removed = {id(message) for message in group["block"]}
         messages = [message for message in messages if id(message) not in removed]
     return messages
