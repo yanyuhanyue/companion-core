@@ -71,6 +71,29 @@ DeepSeek 文档（[Thinking Mode](https://api-docs.deepseek.com/guides/thinking_
 调研见 [MaiBot 机制调研](plans/2026-10-30-maibot-mechanisms.md)。实现在 `companion/input_debounce.py`，
 只对主人授权或私人生活模式下的私聊生效；配置项 `input_debounce`，在控制台“表达与表情”里可以调整或关闭。
 
+## 话轮判断与主动接话（2026-10-30）
+
+**收尾消息可以不回。** 主人刚收到回复后（30 分钟内）只回了一条很短的消息（不超过 8 个字，例如“嗯”“好的”“哈哈”），
+本轮聊天提示词里才会多一段说明，允许模型只输出 `[SKIP]` 不回复。不增加模型调用。以下情况始终回复：
+带问号或“吗/呢/么”结尾；附带图片、引用或转发；指令；上一条回复本身是在提问（这时“嗯”是回答）；
+上一条主人消息没有收到回复（所以不会连续两次不回）；有界真实文本窗口。
+没有给出这段说明却输出了 `[SKIP]` 时，本次回复按失败处理，不会把 `[SKIP]` 发出去；主人的消息进入下一次回复的上下文。
+不回复的轮次在审计日志里记为 `job.succeeded` 且 `reply_skipped: true`。
+
+**冷场后主动接一句。** 聊得正热（主人在上一条回复送达后 5 分钟内就回了）时，如果你回复之后主人 15 分钟没说话，
+后台生成一个主动消息任务：把最近 4 轮对话交给模型，判断要不要自然地补一句，不想说就输出 `[SKIP]`。
+发出的是 `qq.private.proactive` 主动消息。限制：
+- 每次冷场最多一次；最新一条消息必须是你对主人的回复，所以接过一句之后不会再接（不连发）。
+- 回复送达超过 1 小时、主人最后说的是“晚安”“拜拜”之类、勿扰时段、主动消息暂停时，都不会触发。
+- 主人在任务执行前说了话，任务取消；引用的对话被擦除，任务也不会发出。
+- 每天最多判断 3 次，包括模型选择不说的次数。它不占用主动分享的每日次数。
+- 需要主人授权里的 `proactive` 用途，费用记在 `activity` 场景。
+
+MaiBot 的做法是让规划模型每轮调用 `stop()` 或 `wait(秒数)`，等待超时后再跑一轮规划
+（`src/maisaka/builtin_tool/wait.py`、`runtime.py` 的 `_schedule_wait_timeout`）。这样每轮都要调用模型，
+和本项目“一个任务一次结算”的预算、Outbox 模型冲突，所以这里把“不回”做成回复标记，把“过一会儿再看”做成每次冷场一个后台任务，
+复用主动消息的队列、送达和擦除。实现在 `companion/turn_taking.py`；配置项 `turn_taking`，在控制台“表达与表情”里调整或关闭。
+
 ## 关闭方法
 
 | 项 | 关闭写法（`config.toml` 顶层，第一个 `[table]` 之前） |
@@ -80,6 +103,7 @@ DeepSeek 文档（[Thinking Mode](https://api-docs.deepseek.com/guides/thinking_
 | 分段回复 | `segmented_reply = false`；环境变量 `COMPANION_SEGMENTED_REPLY=false`；控制台设为空 |
 | thinking | `chat_thinking = "disabled"` |
 | 连发合并 | `[input_debounce]` 表里写 `enabled = false` |
+| 收尾不回 / 冷场接话 | `[turn_taking]` 表里写 `silence_enabled = false` / `follow_up_enabled = false` |
 
 控制台保存的配置在启动时覆盖文件值。服务器上如果已经显式写了旧值，新默认值不会生效。
 

@@ -64,7 +64,7 @@ def proactive_counts(store, settings, now):
         "WITH reservations(created_at) AS ("
         "SELECT j.created_at FROM jobs j JOIN events e USING(event_id) "
         "WHERE j.kind='activity' AND COALESCE(json_extract(e.body_json,'$.notice.kind'),'') "
-        "NOT IN ('commitment','life') UNION ALL "
+        "NOT IN ('commitment','life','followup') UNION ALL "
         "SELECT updated_at FROM social_candidates WHERE message_id IS NOT NULL "
         "AND NOT EXISTS (SELECT 1 FROM outbox o JOIN jobs j ON j.event_id=o.origin_event_id "
         "WHERE o.message_id=social_candidates.message_id AND j.kind='activity') UNION ALL "

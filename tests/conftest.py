@@ -16,6 +16,7 @@ from companion.input_debounce import InputDebounceConfig
 from companion.jargon_config import JargonConfig
 from companion.model import ModelResponse
 from companion.store import migrate
+from companion.turn_taking import TurnTakingConfig
 
 
 class Clock:
@@ -148,6 +149,7 @@ def core_factory(tmp_path_factory, migrated_database):
             memory_enabled=False, segmented_reply=None, chat_thinking="disabled",
             jargon=JargonConfig(enabled=False),
             input_debounce=InputDebounceConfig(enabled=False),
+            turn_taking=TurnTakingConfig(silence_enabled=False, follow_up_enabled=False),
             conversation_policy=ConversationPolicyConfig(mode="OFF", strategy="participation_v1"),
             # Exact-message tests predate time labels; tests/test_time_context.py covers them.
             chat_time_labels=False,

@@ -189,8 +189,13 @@ def native_selector(core, worker_id) -> RoundRobin:
     async def private_share():
         return UnitResult(bool(core.social.flush()))
 
+    async def follow_up():
+        from companion import turn_taking
+
+        return UnitResult(turn_taking.flush(core.store, core.settings, core.clock()))
+
     async def activity():
-        kinds, authority = ["life", "share", "commitment"], None
+        kinds, authority = ["life", "share", "commitment", "followup"], None
         if owner_authority.required(core.store, core.settings):
             try:
                 view = owner_authority.current(core.store, core.settings, core.clock)
@@ -199,6 +204,7 @@ def native_selector(core, worker_id) -> RoundRobin:
             authority = encode(view.authority.as_dict())
             kinds = [kind for kind, purpose in (
                 ("life", "life"), ("share", "proactive"), ("commitment", "goals"),
+                ("followup", "proactive"),
             ) if purpose in view.policy.purposes]
         row = core.store.one(
             "SELECT j.* FROM jobs j JOIN events e USING(event_id) "
@@ -315,6 +321,7 @@ def native_selector(core, worker_id) -> RoundRobin:
         lane("goal", schedule_goal, ("goals", "exploration")),
         lane("life_topic", life_topic, ("life",)),
         lane("private_share", private_share, ("proactive",)),
+        lane("follow_up", follow_up, ("proactive",)),
         lane("activity", activity),
         lane("poke", poke, ("poke",)),
         lane("meme_caption", meme_caption, ("meme",)),

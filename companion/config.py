@@ -41,6 +41,7 @@ from companion.style_distill_config import StyleDistillConfig
 from companion.style_live_config import StyleLiveConfig
 from companion.token_measurement import TokenMeasurementConfig
 from companion.trial_limits import TrialCount, TrialText
+from companion.turn_taking import TurnTakingConfig
 from companion.video_input import VideoInputPolicy
 from companion.voice_config import VoiceConfig
 from companion.watch_ledger_config import WatchLedgerConfig
@@ -423,6 +424,11 @@ class Settings(BaseModel):
         default_factory=InputDebounceConfig,
         exclude_if=lambda value: value == InputDebounceConfig(),
     )
+    # Closing messages may go unanswered; a lull may get one more line. See turn_taking.py.
+    turn_taking: TurnTakingConfig = Field(
+        default_factory=TurnTakingConfig,
+        exclude_if=lambda value: value == TurnTakingConfig(),
+    )
     # Local time line and history/memory dates in chat context; on by default.
     chat_time_labels: bool = Field(default=True, exclude_if=lambda value: value is True)
     _operator_config_version: int = PrivateAttr(default=0)
@@ -762,6 +768,8 @@ class Settings(BaseModel):
                     data[field] = StyleLiveConfig.model_validate_json(value)
                 elif field == "input_debounce":
                     data[field] = InputDebounceConfig.model_validate_json(value)
+                elif field == "turn_taking":
+                    data[field] = TurnTakingConfig.model_validate_json(value)
                 elif field == "segmented_reply":
                     data[field] = TypeAdapter(SegmentedReplyConfig | None | Literal[False]
                                               ).validate_json(value)
