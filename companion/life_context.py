@@ -75,8 +75,8 @@ def decision_context(store, settings, sources, authority_sha256, now):
                 "requires_reconciliation": unknown,
                 "source_event_ids": sorted(roots),
             })
-        # Phase 1: Interest from any completed goal, not just result_event_id in sources.
         if (goal["state"] != "DONE" or not goal["result_event_id"]
+            or goal["result_event_id"] not in ids
             or not settings.memory_enabled or not permitted(store, settings, now, "memory")):
             continue
         topic = goal["topic"][:80]
@@ -87,14 +87,9 @@ def decision_context(store, settings, sources, authority_sha256, now):
         if not trait:
             continue
         # A plan contributes its final completed result once, never one vote per step.
-        evidence = store.rows(
-            "SELECT e.event_id,e.occurred_at FROM trait_evidence t "
-            "JOIN events e USING(event_id) JOIN observations o USING(event_id) "
-            "WHERE t.trait_id=? AND e.event_id=? AND e.redacted=0 AND o.redacted=0 "
-            "AND o.result_status IN ('FETCHED','WATCHED') AND o.source_sha256<>'' "
-            "AND o.canonical_url<>'' AND e.occurred_at<=?",
-            (trait["trait_id"], goal["result_event_id"], now),
-        )
+        evidence = [row for row in interest.exploration_evidence(
+            store, settings, trait["trait_id"], now,
+        ) if row["event_id"] == goal["result_event_id"]]
         if evidence:
             state, sessions, days = interest.tendency(evidence, settings)
             result["self_interests"].append({
@@ -104,4 +99,8 @@ def decision_context(store, settings, sources, authority_sha256, now):
                 "independent_days": days,
                 "source_event_ids": sorted(roots | {goal["result_event_id"]}),
             })
+    if settings.life_loop.autonomy_enabled:
+        from companion.life_autonomy import enhance_decision_context
+
+        result = enhance_decision_context(result)
     return result

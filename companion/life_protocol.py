@@ -20,7 +20,7 @@ class LifeLoopConfig(StrictModel):
     max_daily_decisions: int = Field(default=2, ge=0, le=10)
     min_interval_seconds: int = Field(default=3600, ge=60, le=86400)
     read_goals_enabled: bool = False
-    autonomy_enabled: bool = False  # Enable tactical/strategic autonomy layers
+    autonomy_enabled: bool = False  # Source-bound guidance; native goals own execution.
 
 
 class LifeQZoneSourceGrant(StrictModel):
@@ -90,12 +90,16 @@ class LifeDecision(StrictModel):
     )
     defer_seconds: int | None = Field(default=None, ge=60, le=86400)
     interest_shift: str | None = Field(
-        default=None, max_length=200,
-        description="Optional observation about changes in self-exploration interests"
+        default=None, min_length=1, max_length=200,
+        description="Private diary reflection about self-exploration interests",
     )
 
     @model_validator(mode="after")
     def coherent(self):
+        if self.interest_shift is not None and (
+            self.destination != "PRIVATE_DIARY" or not self.interest_shift.strip()
+        ):
+            raise ValueError("interest reflection requires a private diary destination")
         if self.action in {"SKIP", "DEFER", "CONTINUE", "EXPLORE"}:
             if self.destination != "NONE" or self.text:
                 raise ValueError("non-expressive actions have no prose or destination")

@@ -18,7 +18,7 @@ from tests.conftest import ingest, run
 
 
 def configure(core, mode="SHADOW"):
-    core.settings.life_loop = LifeLoopConfig(mode=mode)
+    core.settings.life_loop = LifeLoopConfig(mode=mode, autonomy_enabled=True)
     core.settings.wake_enabled = True
     core.settings.quiet_start = core.settings.quiet_end = 0
 
