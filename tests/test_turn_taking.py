@@ -158,6 +158,83 @@ def test_a_lull_after_a_lively_chat_gets_one_follow_up(core):
     assert not turn_taking.flush(core.store, core.settings, core.clock())  # No double text.
 
 
+@pytest.mark.parametrize(("owner", "answer", "wording"), [
+    ("还行，就是有点仓促", "我也觉得，尤其是那个配角，还有一点可以说。",
+     "那个配角最后没有回头，我觉得比直接解释自己的选择更有劲。"),
+    ("这个话题就说到这里吧", "好，这一段就到这里。", turn_taking.SKIP),
+    ("我先去开个会", "好，你先忙。", turn_taking.SKIP),
+    ("也可以聊点别的", "我想想。", "忽然想到，游戏里的钓鱼经常比主线还有吸引力。"),
+    ("对，没有别的了", "好，说明白就行。", turn_taking.SKIP),
+])
+def test_same_timing_allows_content_handoff_new_topic_or_skip(core, owner, answer, wording):
+    # These are simulated choices, not evidence that a live model judged them well.
+    enable(core)
+    turn(core, 1, "我刚看完那部电影", "结局你喜欢吗？")
+    core.clock.advance(60)
+    turn(core, 2, owner, answer)
+    core.clock.advance(900)
+    core.model.activity.append(wording)
+    before = len(core.model.calls)
+    assert turn_taking.flush(core.store, core.settings, core.clock())
+    assert run(run_notice(core))
+    assert len(core.model.calls) == before + 1
+    messages, scenario = core.model.calls[-1]
+    assert scenario == "activity"
+    payload = json.loads(messages[-1]["content"])
+    assert payload["silent_minutes"] == 15
+    assert payload["turns"][-1] == {
+        "owner": owner, "you": answer, "owner_at": core.store.one(
+            "SELECT occurred_at FROM events WHERE event_id='evt_test_2'")["occurred_at"],
+        "owner_truncated": False, "you_truncated": False,
+    }
+    assert not payload["excerpt_truncated"]
+    items = lease(core)
+    assert [item["content"]["text"] for item in items] == (
+        [] if wording == turn_taking.SKIP else [wording])
+    # A completed check, including SKIP, does not become a recurring planner.
+    core.clock.advance(60)
+    assert not turn_taking.flush(core.store, core.settings, core.clock())
+    assert len(core.model.calls) == before + 1
+
+
+@pytest.mark.parametrize("speaker", ["owner", "you"])
+def test_long_turn_keeps_its_final_stance_and_marks_missing_middle(core, speaker):
+    enable(core)
+    turn(core, 1, "我刚看完那部电影", "结局你喜欢吗？")
+    core.clock.advance(60)
+    ending = "这段就说到这里，接下来要先忙别的了。"
+    long = "说说电影里的那个配角。" + "中间还有不少细节。" * 60 + ending
+    turn(core, 2, long if speaker == "owner" else "还行，就是有点仓促",
+         long if speaker == "you" else "好，先忙你的。")
+    core.clock.advance(900)
+    core.model.activity.append(turn_taking.SKIP)
+    assert turn_taking.flush(core.store, core.settings, core.clock())
+    assert run(run_notice(core))
+    payload = json.loads(core.model.calls[-1][0][-1]["content"])
+    excerpt = payload["turns"][-1][speaker]
+    assert excerpt.startswith("说说电影里的那个配角。") and excerpt.endswith(ending)
+    assert len(excerpt) == turn_taking.TURN_CHARS and "…" in excerpt
+    assert payload["turns"][-1][speaker + "_truncated"] and payload["excerpt_truncated"]
+    assert lease(core) == []
+
+
+def test_changing_omitted_text_still_withholds_the_follow_up(core):
+    enable(core)
+    turn(core, 1, "我刚看完那部电影", "结局你喜欢吗？")
+    core.clock.advance(60)
+    original = "电影里的细节。" * 80
+    turn(core, 2, original, "还有一点可以聊。")
+    core.clock.advance(900)
+    core.model.activity.append("那个配角的选择比结局本身更有意思。")
+    assert turn_taking.flush(core.store, core.settings, core.clock())
+    assert run(run_notice(core))
+    changed = original[:200] + "改" + original[201:]
+    assert turn_taking._excerpt(original) == turn_taking._excerpt(changed)
+    core.store.execute("UPDATE events SET body_json=json_set(body_json,'$.text',?) "
+                       "WHERE event_id='evt_test_2'", (changed,))
+    assert lease(core) == []
+
+
 def test_the_owner_speaking_first_cancels_the_follow_up(core):
     enable(core)
     lively(core)
@@ -281,6 +358,10 @@ def test_real_http_and_independent_worker_settle_one_follow_up_across_restart(co
             observed = await process_worker(core, tmp_path, "followup", "evt_test_2")
             assert observed["provider_calls"] == 1
             assert observed["materials"][0]["kind"] == "followup"
+            material = observed["materials"][0]
+            assert not material["excerpt_truncated"]
+            assert all(turn["owner_at"] and not turn["owner_truncated"]
+                       and not turn["you_truncated"] for turn in material["turns"])
             assert {unit["lane"] for unit in observed["units"] if unit["progressed"]} >= {
                 "follow_up", "activity",
             }
