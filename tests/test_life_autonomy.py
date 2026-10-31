@@ -41,7 +41,7 @@ def test_guidance_uses_only_current_source_closure_and_has_no_write_or_clock(cor
     assert context(core, ["evt_test_1", "obs_test_1"]) == view
     assert core.store.db.total_changes == before
     assert core.store.one("SELECT version_num FROM alembic_version")["version_num"] == (
-        "0055_runtime_configuration"
+        "0056_watch_ledger_goal_reads"
     )
     assert core.store.rows("PRAGMA foreign_key_check") == []
 

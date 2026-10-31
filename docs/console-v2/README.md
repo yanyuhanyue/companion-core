@@ -13,7 +13,7 @@
 | 记忆（含“召回测试”“黑话”标签） | `memories`（`q`、`review`）、`memories/recall`（`q`，按聊天检索排序并给出关键词/语义名次、相似度和融合分，不调用模型）、`jargon` | `memories/{id}/decision`、`jargon/forget` |
 | 日记与成长 | `life`、`diary/{day}`、`goals`、`reflections`、`life/topics` | `diary/{day}/correction`、`diary/{day}/forget`、`mode`、目标决定与续行、反思决定、`life/topics/{id}/close` |
 | 情绪与偏好 | `affect`、`interests`、`expression-learning`、`style-candidates` | `affect/reset`、`style-candidates/{sha256}/decision`（批准或拒绝表达候选） |
-| 阅读与文件（含“她看过的”和来源授权标签） | `content`、`watch-ledger`、`source-grants` | `source-grants/{id}`（撤回或遗忘） |
+| 阅读与文件（含“她看过的”和来源授权标签） | `content`、`watch-ledger`、`source-grants` | `source-grants/{id}`（撤回或遗忘）、`watch-ledger/{entry_id}/withdraw`（撤回一条看法） |
 | 表情素材、语音与节点、QQ 资料行为 | `memes`、`voice`、`account-actions` | 无 |
 | 执行任务 | `tools` | `tools/{id}/decision`、`tools/{id}/revoke` |
 | 能力与开关 | `overview` 的能力快照、`configuration`、`autonomy` | `configuration`、`mode`、授权与调整决定 |
