@@ -104,7 +104,7 @@ def _native_context(view, job_id, current_epoch):
         entries = [item for item in snapshots if item["kind"] == "context_plan"]
         if len(entries) == 1:
             metadata = entries[0]["metadata"]["core_context"]
-            if metadata.get("version") == 1 and metadata.get("privacy_epoch") != current_epoch:
+            if metadata.get("version") in {1, 2} and metadata.get("privacy_epoch") != current_epoch:
                 return {**result, "state": "STALE_EPOCH"}
         job = view.one("SELECT job_id,authority_json FROM jobs WHERE job_id=?", (job_id,))
         plan = check_bound(view, job, snapshots, current_epoch)

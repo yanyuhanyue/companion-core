@@ -178,14 +178,26 @@ def recent_context_sources(store, conversation_id, current_event_id, max_turns, 
 
 
 def fit_context(rules, references, turns, current_input, soft_limit, *, settings=None,
-                scenario="chat"):
-    """Drop optional references, then oldest whole turns; preserve rules/current input.
+                scenario="chat", blocks=None):
+    """Apply the same trusted priority order as final request planning.
 
     Current input also includes its bounded shared-content reference, when present.
     If those required parts exceed the soft bound, leave them complete for admission.
     """
-    groups = [[message] for message in references] + turns
-    messages = [rules, *(message for group in groups for message in group), *current_input]
+    from companion.context_selection import BACKGROUND, OLD_HISTORY, TOPIC, drop_order
+
+    if blocks is None:
+        blocks = [("rules", [rules], True, TOPIC),
+                  *(("reference", [message], False, BACKGROUND) for message in references),
+                  *(("history", turn, False, OLD_HISTORY) for turn in turns),
+                  ("current", current_input, True, TOPIC)]
+    groups, offset = [], 0
+    for kind, block, required, priority in blocks:
+        groups.append({"wire_start": offset, "priority": priority,
+                       "required": required or any(isinstance(m["content"], list) for m in block),
+                       "block": block, "kind": kind})
+        offset += len(block)
+    messages = [message for group in groups for message in group["block"]]
     def count():
         if settings is None:
             return token_upper_bound(messages)
@@ -196,6 +208,9 @@ def fit_context(rules, references, turns, current_input, soft_limit, *, settings
         return soft_limit + 1 if pressure(settings, measured, soft_limit=soft_limit,
                                          scenario=scenario) else 0
 
-    while groups and count() > soft_limit:
-        del messages[1 : 1 + len(groups.pop(0))]
+    for group in drop_order(groups):
+        if count() <= soft_limit:
+            break
+        removed = {id(message) for message in group["block"]}
+        messages = [message for message in messages if id(message) not in removed]
     return messages

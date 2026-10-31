@@ -10,6 +10,7 @@ from copy import deepcopy
 from dataclasses import replace
 
 from companion.agent_messages import request_wire, to_wire_messages
+from companion.context_selection import BACKGROUND, OLD_HISTORY, TOPIC, drop_order
 from companion.contracts import CoreError
 from companion.paid_budget import sha
 from companion.privacy import epoch
@@ -66,7 +67,7 @@ def _ids(values):
     )
 
 
-def _record(record, proofs):
+def _record(record, proofs, version):
     if not isinstance(record, dict) or set(record) != {
         "payload_sha256",
         "measurement_sha256",
@@ -93,7 +94,9 @@ def _record(record, proofs):
     for item in record["dropped"]:
         if (
             not isinstance(item, dict)
-            or set(item) != {"group_id", "kind", "reason"}
+            or set(item) != ({"group_id", "kind", "reason"}
+                             | ({"priority"} if version == 2 else set()))
+            or version == 2 and not _integer(item.get("priority"), TOPIC)
             or item["kind"] not in {"reference", "history"}
             or item["reason"] not in REASONS
         ):
@@ -110,7 +113,7 @@ def _record(record, proofs):
 
 
 def validate(snapshots, job, current_epoch):
-    """Validate internal v1 structure/bindings. Old/unknown versions grant no pruning."""
+    """Validate current and persisted v1 layouts; unknown versions grant no pruning."""
     try:
         entries = [item for item in snapshots if item["kind"] == "context_plan"]
         if not entries:
@@ -125,7 +128,7 @@ def validate(snapshots, job, current_epoch):
             raise ValueError
         if type(plan.get("version")) is not int:
             raise ValueError
-        if plan["version"] != 1:
+        if plan["version"] not in {1, 2}:
             return None
         if set(plan) != {
             "version",
@@ -165,7 +168,9 @@ def validate(snapshots, job, current_epoch):
             if (
                 not isinstance(group, dict)
                 or set(group)
-                != {"group_id", "kind", "wire_start", "wire_count", "messages_sha256", "required"}
+                != ({"group_id", "kind", "wire_start", "wire_count", "messages_sha256", "required"}
+                    | ({"priority"} if plan["version"] == 2 else set()))
+                or plan["version"] == 2 and not _integer(group.get("priority"), TOPIC)
                 or group["kind"] not in KINDS
                 or type(group["required"]) is not bool
                 or not _integer(group["wire_start"], 512)
@@ -188,14 +193,14 @@ def validate(snapshots, job, current_epoch):
         ):
             raise ValueError
         for record in plan["requests"]:
-            _record(record, proofs)
+            _record(record, proofs, plan["version"])
             if record["state"] != "ADMITTED":
                 raise ValueError
         request_ids = [record["request_id"] for record in plan["requests"]]
         if len(set(request_ids)) != len(request_ids):
             raise ValueError
         if plan["pending"] is not None:
-            _record(plan["pending"], proofs)
+            _record(plan["pending"], proofs, plan["version"])
             if plan["pending"]["state"] == "ADMITTED":
                 raise ValueError
         latest = plan["pending"] or (plan["requests"][-1] if plan["requests"] else None)
@@ -239,7 +244,7 @@ def initialize(core, job, messages, blocks, snapshots):
     if any(item["kind"] == "context_plan" for item in snapshots):
         raise CoreError("CONTEXT_PLAN_INVALID", 409)
     groups, offset = [], 0
-    for kind, block, required in blocks:
+    for kind, block, required, priority in blocks:
         if not block:
             continue
         span = messages[offset : offset + len(block)]
@@ -257,6 +262,7 @@ def initialize(core, job, messages, blocks, snapshots):
                 "wire_count": len(block),
                 "messages_sha256": sha(block),
                 "required": required,
+                "priority": priority,
             }
         )
         offset += len(block)
@@ -264,7 +270,7 @@ def initialize(core, job, messages, blocks, snapshots):
         return
     proofs = _proofs(snapshots)
     plan = {
-        "version": 1,
+        "version": 2,
         "job_id": job["job_id"],
         "privacy_epoch": epoch(core.store),
         "authority_sha256": sha(json.loads(job["authority_json"])),
@@ -337,18 +343,17 @@ def plan_request(core, job, snapshots, request_context):
         )
 
     measured = measure()
-    optional = sorted(
-        (group for group in groups if not group["required"]),
-        key=lambda group: (group["kind"] == "history", group["wire_start"]),
-    )
+    optional = drop_order([{**group, "priority": group.get("priority", (
+        OLD_HISTORY if group["kind"] == "history" else BACKGROUND))} for group in groups])
     for group in optional:
         reason = pressure(core.settings, measured)
         if reason is None:
             break
-        dropped.append({"group_id": group["group_id"], "kind": group["kind"], "reason": reason})
+        dropped.append({"group_id": group["group_id"], "kind": group["kind"], "reason": reason,
+                        **({"priority": group["priority"]} if plan["version"] == 2 else {})})
         removed.update(range(group["wire_start"], group["wire_start"] + group["wire_count"]))
         messages = _filter(list(request_context.messages), removed)
-        groups.remove(group)
+        groups = [item for item in groups if item["group_id"] != group["group_id"]]
         measured = measure()
     offset = 0
     for group in groups:

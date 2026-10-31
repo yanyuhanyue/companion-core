@@ -56,7 +56,8 @@ def judgement(store, settings, event_id, item_ref, cutoff):
     if (not entry or expired_sources(store, [entry["source_event_id"]], cutoff)
             or sensitive(entry["take"]) or redact(entry["take"], settings) != entry["take"]):
         return None
-    return {"entry_id": entry["entry_id"], "rating": entry["rating"], "take": entry["take"],
+    return {"entry_id": entry["entry_id"], "source_event_id": entry["source_event_id"],
+            "rating": entry["rating"], "take": entry["take"],
             "judged_at": entry["updated_at"]}
 
 
@@ -115,6 +116,9 @@ def _stance(window, settings):
 
 def _experience(row):
     return {"event_id": row["event_id"], "occurred_at": row["occurred_at"],
+            "source_event_id": row["judgement"]["source_event_id"],
+            "entry_id": row["judgement"]["entry_id"],
+            "judged_at": row["judgement"]["judged_at"],
             "origin": row.get("origin", "self"), "rating": row["judgement"]["rating"],
             "take": row["judgement"]["take"]}
 

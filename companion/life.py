@@ -190,6 +190,11 @@ class LifeService:
                 "state": goal["state"],
                 "commitment_state": goal["commitment_state"],
             }
+            from companion.interest import read_origin
+            from companion.watch_ledger import ORIGINS
+
+            origin = goal["kind"]
+            urls = GoalScope.model_validate_json(goal["scope_json"]).targets()
             if goal["result_event_id"]:
                 event = self.store.one(
                     "SELECT body_json FROM events WHERE event_id=? AND redacted=0",
@@ -198,5 +203,13 @@ class LifeService:
                 if event:
                     item["verified_result"] = json.loads(event["body_json"])["text"][:300]
                     item["result_event_id"] = goal["result_event_id"]
+                observation = self.store.one("SELECT canonical_url,evidence_json FROM observations "
+                    "WHERE event_id=?", (goal["result_event_id"],))
+                if observation:
+                    urls.extend([observation["canonical_url"], json.loads(
+                        observation["evidence_json"] or "{}").get("requested_url", "")])
+            if origin == "self":
+                origin = read_origin(self.store, goal["goal_id"], urls)
+            item["origin"] = ORIGINS.get(origin, ORIGINS[None])
             items.append(item)
         return items

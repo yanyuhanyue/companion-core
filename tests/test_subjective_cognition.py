@@ -294,6 +294,8 @@ def test_paid_judgement_of_a_goal_read_becomes_her_view(core, tmp_path):
     current = item(core, ASTRONOMY)
     assert current["view"]["latest"] == [{
         "event_id": result, "occurred_at": current["evidence"][0]["occurred_at"],
+        "source_event_id": result, "entry_id": watch_ledger.recent(core.store)[0]["entry_id"],
+        "judged_at": core.clock(),
         "origin": "self", "rating": 2, "take": "原来星光颜色能看出温度"}]
     assert watch_ledger.recent(core.store)[0]["origin"] == watch_ledger.ORIGINS["self"]
     # One read is one judgement: another pass makes no further call.
